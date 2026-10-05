@@ -51,9 +51,24 @@ Not a chatbot that answers. A **persistent learner coach** that:
 
 ## 3. Research: what other systems do well
 
+**How we use prior art (important):**
+
+This project studies public AI-tutor designs for **ideas and architecture patterns**.
+We do **not** copy external repositories wholesale. Implementation in this repo
+(tutor.py, core.py, prompts, evals, catalog seed) is original work written for
+this project.
+
+| Kind of reuse | Our rule |
+|---------------|----------|
+| Ideas / pedagogy / architecture | OK — normal engineering research |
+| Design patterns (orchestrator, abstain, eval harness) | OK — reimplemented in our own code |
+| **Source code or substantial text** from another repo | Only if that project's **LICENSE** allows it, and with required attribution |
+
 Sources reviewed (2026-10): NavyashreeNS/ai-tutor, carlosceja27/ai-tutor, utsabpanta/ai-tutoring, Bhala-Srinivash/agent-tutor-skill, hanselhansel/ai-learning-engine, Tutor MCP, OpenTutor variants, various Hermes skills.
 
 ### 3.1 NavyashreeNS/ai-tutor — highest leverage for learner model
+
+Licence (upstream): **MIT** (confirmed on GitHub README / LICENSE).
 
 **Core idea:** four subsystems; **only one** uses an LLM.
 
@@ -65,37 +80,44 @@ Sources reviewed (2026-10): NavyashreeNS/ai-tutor, carlosceja27/ai-tutor, utsabp
 | Prerequisite-Graph Question Selector | yes | which concept + which question |
 | Misconception Hypothesis Classifier | **only LLM call** | *which* mental model |
 
-**Steal / adapt**
+**Learn / adapt (ideas only — reimplemented here)**
 
 - **Named misconception catalogue** (closed set per concept), not only free-form text  
-- Classifier may **abstain** (`NONE`) — forced wrong diagnosis is worse than none  
+- Classifier may **abstain** — forced wrong diagnosis is worse than none  
 - **Asymmetric penalty**: named MC costs more mastery than unexplained error  
 - Selector teaches the **deepest gap**, not the nearest symptom  
-- Reply can be **assembled** from templates so the correct answer never leaks as free text (harder for open-domain topics; still useful for quizzes)
+- Reply templates that avoid leaking the full answer as free text (useful for quizzes)
 
 ### 3.2 carlosceja27/ai-tutor — pedagogy as skill
+
+Licence (upstream): **Apache 2.0** (LICENSE + NOTICE in repo).
 
 - Modes: `/learn` `/practice` `/review` `/quiz` `/explain`  
 - “Never think for the learner”  
 - Retrieval before review; layered hints; interleaving  
 
-**Steal / adapt:** modes as **policies on the same state**, chosen by orchestrator — not separate agents and not always user-driven.
+**Learn / adapt (ideas only):** modes as **policies on the same state**, chosen by orchestrator — not separate agents and not always user-driven.  
+No code or SKILL.md text was copied from that repo into this project.
 
 ### 3.3 utsabpanta/ai-tutoring — local Socratic + evals
+
+Licence (upstream): **MIT** (stated on GitHub).
 
 - Ollama-first, anti-homework-dump  
 - **Eval suite** as quality gate (anti-dump cases, etc.)  
 - Versioned prompts  
 
-**Steal / adapt:** small `evals/` with fixed dialogues (no answer leak, no question repeat, resume = retrieval first).
+**Learn / adapt (ideas only):** small `evals/` with fixed dialogues (no answer leak, no question repeat, resume = retrieval first). Our eval cases and runner are written for this codebase.
 
 ### 3.4 FSRS / teaching-loop skills (Bhala, hanselhansel, OpenTutor)
 
-- **FSRS** adaptive intervals > fixed day buckets  
+- **FSRS** adaptive intervals > fixed day buckets (algorithm from spaced-repetition literature; our scheduler is a **simplified FSRS-inspired** implementation, not a vendor of another project's source tree)  
 - Loop: Explain → Example → Check → Evaluate → Practice  
 - Zero-hint quizzes; pre-testing; teach-back; confidence calibration  
 
-**Steal / adapt later:** FSRS for `next_review`; teach-back activity; pre-test on concept resume.
+**Learn / adapt (ideas):** FSRS-like `next_review`; teach-back activity; pre-test on concept resume.
+
+**Licence caution:** `hanselhansel/ai-learning-engine` and `zijinz456/OpenTutor` were **not** confirmed here as MIT/Apache from a primary LICENSE file. Treat as **inspiration only** until LICENSE is verified. Public on GitHub ≠ free to copy code.
 
 ### 3.5 Multi-agent (LangGraph, etc.)
 
@@ -255,7 +277,7 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 | 2026-10 | Native `/api/chat` + `think=false` for Qwen3.8 |
 | 2026-10 | Situation packing teach/meta; session_thread + anti-repeat |
 | 2026-10 | Deterministic activity orchestrator (Phase A) shipped |
-| 2026-10 | Do not copy external repos wholesale; borrow policies |
+| 2026-10 | Prior art: study ideas/patterns only; no wholesale code copy; licence-safe attribution if ever vendoring |
 | 2026-10 | Eval harness Phase B shipped (`evals/run_evals.py`) |
 | 2026-10 | Named misconception catalogue (Phase C) shipped |
 | 2026-10 | FSRS-inspired scheduling (Phase D) shipped |
@@ -264,15 +286,19 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 
 ---
 
-## 11. References (repos)
+## 11. References (repos) — prior art, not vendored code
 
-- https://github.com/NavyashreeNS/ai-tutor  
-- https://github.com/carlosceja27/ai-tutor  
-- https://github.com/utsabpanta/ai-tutoring  
-- https://github.com/Bhala-Srinivash/agent-tutor-skill  
-- https://github.com/hanselhansel/ai-learning-engine  
-- https://github.com/ArnaudGuiovanna/tutor-mcp  
-- https://github.com/zijinz456/OpenTutor  
+| Repo | Stated licence (check LICENSE before any code reuse) | How we used it |
+|------|------------------------------------------------------|----------------|
+| [NavyashreeNS/ai-tutor](https://github.com/NavyashreeNS/ai-tutor) | MIT | Ideas: MC catalogue, abstain, deepest gap |
+| [carlosceja27/ai-tutor](https://github.com/carlosceja27/ai-tutor) | Apache 2.0 | Ideas: retrieval-first, policy modes |
+| [utsabpanta/ai-tutoring](https://github.com/utsabpanta/ai-tutoring) | MIT | Ideas: local Ollama, eval harness |
+| [Bhala-Srinivash/agent-tutor-skill](https://github.com/Bhala-Srinivash/agent-tutor-skill) | check LICENSE | Ideas only until verified |
+| [hanselhansel/ai-learning-engine](https://github.com/hanselhansel/ai-learning-engine) | **unverified** | Ideas only |
+| [ArnaudGuiovanna/tutor-mcp](https://github.com/ArnaudGuiovanna/tutor-mcp) | often listed MIT — verify | Ideas only |
+| [zijinz456/OpenTutor](https://github.com/zijinz456/OpenTutor) | **unverified** | Ideas only |
+
+If this repository later **includes** third-party source files, add their LICENSE/NOTICE under e.g. `third_party/` and list them in a NOTICE file. As of 2026-10, no such vendored code is present.
 
 ---
 
