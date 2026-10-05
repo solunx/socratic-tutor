@@ -14,6 +14,7 @@ build/
 # Local learner data (privacy — do not push)
 learner_state.json
 learner_state.json.bak*
+web_conversation.json
 *.json.bak
 
 # Optional local overrides

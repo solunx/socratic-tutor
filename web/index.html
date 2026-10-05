@@ -160,11 +160,8 @@
   </footer>
 
   <script>
-    const sessionId = localStorage.getItem("tutor_session_id") || (() => {
-      const id = "web-" + Math.random().toString(36).slice(2, 10);
-      localStorage.setItem("tutor_session_id", id);
-      return id;
-    })();
+    // Shared on server for all devices (iPhone + laptop)
+    const sessionId = "george";
 
     const log = document.getElementById("log");
     const input = document.getElementById("input");
@@ -236,25 +233,48 @@
 
     async function bootstrap() {
       try {
-        const r = await fetch("/api/bootstrap");
+        const r = await fetch("/api/bootstrap?session_id=" + encodeURIComponent(sessionId));
         const data = await r.json();
         modelBadge.textContent = data.model || "tutor";
         renderSubjects(data.subjects || []);
-        const n = (data.subjects || []).length;
-        addBubble(
-          "system",
-          n
-            ? `Klaar · ${n} onderwerp(en). Tik ☰ of typ wat je wilt leren.`
-            : "Klaar · start met een onderwerp, bv. “ik wil agents leren”."
-        );
+        const hist = data.history || [];
+        if (hist.length) {
+          addBubble("system", "Vorige chat hersteld (" + hist.length + " berichten).");
+          for (const m of hist) {
+            addBubble(m.role === "you" ? "you" : "tutor", m.text);
+          }
+        } else {
+          const n = (data.subjects || []).length;
+          addBubble(
+            "system",
+            n
+              ? `Klaar · ${n} onderwerp(en). Tik ☰ of typ wat je wilt leren.`
+              : "Klaar · start met een onderwerp, bv. “ik wil agents leren”."
+          );
+        }
       } catch (e) {
         addBubble("system", "Kan de server niet bereiken. Draait de gateway op Tailscale?");
       }
     }
 
+    let inFlight = false;
+    let lastSentText = "";
+    let lastSentAt = 0;
+
     async function send() {
       const text = input.value.trim();
       if (!text) return;
+      // Ignore double-tap / resend while a request is still running
+      if (inFlight) return;
+      // Ignore identical resend within 8s (typical "retry after network glitch")
+      const now = Date.now();
+      if (text === lastSentText && now - lastSentAt < 8000) {
+        addBubble("system", "Zelfde bericht is net verstuurd — even wachten op antwoord.");
+        return;
+      }
+      inFlight = true;
+      lastSentText = text;
+      lastSentAt = now;
       input.value = "";
       autoSize();
       addBubble("you", text);
@@ -272,11 +292,13 @@
             channel: "web",
           }),
         });
+        if (!r.ok) throw new Error("HTTP " + r.status);
         const data = await r.json();
         handleResult(data);
       } catch (e) {
-        addBubble("system", "Netwerkfout: " + e.message);
+        addBubble("system", "Netwerkfout: " + e.message + " — stuur niet opnieuw tenzij de tutor echt niet antwoordt.");
       } finally {
+        inFlight = false;
         sendBtn.disabled = false;
         input.classList.remove("busy");
         input.focus();
@@ -307,19 +329,13 @@
         return;
       }
 
-      if (data.kind === "state" && data.summary) {
-        const s = data.summary;
-        const lines = [
-          "Active: " + (s.active_session && s.active_session.active
-            ? (s.active_session.subject_id + " / " + (s.active_session.concept_id || "—"))
-            : "nee"),
-          "Subjects: " + (s.subjects || []).length,
-          "Due reviews: " + (s.due_reviews || 0),
-        ];
-        if (s.active_session && s.active_session.session_thread) {
-          lines.push("Thread: " + s.active_session.session_thread);
-        }
-        addBubble("system", lines.join("\n"));
+      if ((data.kind === "state" || data.kind === "state_full") && data.response) {
+        addBubble("system", data.response);
+        return;
+      }
+
+      if (data.kind === "quit" || data.kind === "help" || data.kind === "reset") {
+        addBubble("system", data.response || "");
         return;
       }
 

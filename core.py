@@ -58,6 +58,36 @@ def resume_payload(state: dict, subject_id: str) -> dict:
     }
 
 
+def _subject_detail_lines(state: dict) -> list:
+    """Lines for every subject (not only the active one) for /state display."""
+    lines = []
+    for item in subjects_payload(state):
+        sid = item["id"]
+        sub = (state.get("subjects") or {}).get(sid) or {}
+        concepts = sub.get("concepts") or {}
+        lines.append(f"  {item['title']} ({sid})")
+        if item.get("goal"):
+            g = str(item["goal"])
+            lines.append(f"    goal: {g[:80]}{'…' if len(g) > 80 else ''}")
+        if not concepts:
+            lines.append("    concepts: (none yet)")
+            continue
+        for cid, cpt in concepts.items():
+            if not isinstance(cpt, dict):
+                continue
+            avg = T.average_mastery(cpt)
+            open_mc = sum(
+                1
+                for m in (cpt.get("misconceptions") or [])
+                if isinstance(m, dict) and m.get("status", "open") != "resolved"
+            )
+            mc_bit = f", MC open={open_mc}" if open_mc else ""
+            lines.append(f"    {cpt.get('title', cid)}: avg={avg:.2f}{mc_bit}")
+        if item.get("status"):
+            lines.append(f"    status: {item['status']}")
+    return lines
+
+
 def state_summary(state: dict) -> dict:
     active = state.get("active_session") or {}
     T.rebuild_review_queue(state)
@@ -65,6 +95,7 @@ def state_summary(state: dict) -> dict:
         "version": state.get("version"),
         "learner_id": (state.get("learner") or {}).get("id"),
         "subjects": subjects_payload(state),
+        "subject_lines": _subject_detail_lines(state),
         "active_session": {
             "active": bool(active.get("active")),
             "subject_id": active.get("subject_id"),
@@ -90,8 +121,16 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             "agent": "tutor",
             "kind": "help",
             "response": (
-                "Commands: /subjects, /state, /review, /new <topic>, /reset, /help\n"
-                "Or natural language: “ik wil verder met agents”, “welke onderwerpen?”"
+                "Commands:\n"
+                "  /subjects     lijst onderwerpen\n"
+                "  /state        korte samenvatting\n"
+                "  /state full   iets meer detail (geen ruwe JSON in chat)\n"
+                "  /review       due reviews\n"
+                "  /new <topic>  nieuw onderwerp\n"
+                "  /reset        alleen chatcontext leeg\n"
+                "  /quit         sessie opslaan / afsluiten\n"
+                "  /help\n"
+                "Natuurlijke taal: “ik wil verder met agents”, “welke onderwerpen?”"
             ),
             "subjects": subjects_payload(state),
         }
@@ -106,12 +145,67 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
         }
 
     if low == "/state":
+        summary = state_summary(state)
+        active = state.get("active_session") or {}
+        lines = [
+            f"Active: {bool(active.get('active'))}"
+            + (
+                f" · {active.get('subject_id')} / {active.get('current_concept_id') or '—'}"
+                if active.get("active")
+                else ""
+            ),
+            f"Due reviews: {summary.get('due_reviews', 0)}",
+            "Subjects:",
+        ]
+        lines.extend(summary.get("subject_lines") or ["  (none)"])
         return {
             "ok": True,
             "agent": "tutor",
             "kind": "state",
-            "response": "Learner state summary.",
+            "response": "\n".join(lines),
+            "summary": summary,
+        }
+
+    if low in ("/state full", "/statefull", "/json"):
+        summary = state_summary(state)
+        active = state.get("active_session") or {}
+        lines = [
+            f"version: {state.get('version')}",
+            f"learner: {(state.get('learner') or {}).get('id')}",
+            f"active: {bool(active.get('active'))}",
+            f"subject: {active.get('subject_id')}",
+            f"concept: {active.get('current_concept_id')}",
+            f"activity: {active.get('current_activity')}",
+            f"questions: {active.get('question_number')}",
+            f"thread: {active.get('session_thread') or '—'}",
+            f"last_q: {active.get('last_tutor_question') or '—'}",
+            f"due_reviews: {len(state.get('review_queue') or [])}",
+            "",
+            "All subjects & concepts:",
+        ]
+        lines.extend(summary.get("subject_lines") or ["  (none)"])
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "state_full",
+            "response": "\n".join(lines),
+            "summary": summary,
+        }
+
+    if low in ("/quit", "/exit", "/stop"):
+        active = state.get("active_session") or {}
+        if active.get("active"):
+            T.close_session(state, active.get("resume_instruction"))
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "quit",
+            "response": (
+                "Sessie opgeslagen. Je kunt later verder met "
+                "“ik wil verder met …” of via ☰."
+            ),
             "summary": state_summary(state),
+            "subjects": subjects_payload(state),
         }
 
     if low == "/review":

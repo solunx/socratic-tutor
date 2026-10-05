@@ -288,17 +288,24 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 
 ## 11. References (repos) — prior art, not vendored code
 
-| Repo | Stated licence (check LICENSE before any code reuse) | How we used it |
-|------|------------------------------------------------------|----------------|
+| Repo | Licence | How we used it |
+|------|---------|----------------|
 | [NavyashreeNS/ai-tutor](https://github.com/NavyashreeNS/ai-tutor) | MIT | Ideas: MC catalogue, abstain, deepest gap |
 | [carlosceja27/ai-tutor](https://github.com/carlosceja27/ai-tutor) | Apache 2.0 | Ideas: retrieval-first, policy modes |
 | [utsabpanta/ai-tutoring](https://github.com/utsabpanta/ai-tutoring) | MIT | Ideas: local Ollama, eval harness |
-| [Bhala-Srinivash/agent-tutor-skill](https://github.com/Bhala-Srinivash/agent-tutor-skill) | check LICENSE | Ideas only until verified |
-| [hanselhansel/ai-learning-engine](https://github.com/hanselhansel/ai-learning-engine) | **unverified** | Ideas only |
-| [ArnaudGuiovanna/tutor-mcp](https://github.com/ArnaudGuiovanna/tutor-mcp) | often listed MIT — verify | Ideas only |
-| [zijinz456/OpenTutor](https://github.com/zijinz456/OpenTutor) | **unverified** | Ideas only |
+| [Bhala-Srinivash/agent-tutor-skill](https://github.com/Bhala-Srinivash/agent-tutor-skill) | MIT | Ideas: FSRS, teaching loop |
+| [hanselhansel/ai-learning-engine](https://github.com/hanselhansel/ai-learning-engine) | MIT | Ideas: adaptive learning, mastery, Socratic loop |
+| [ArnaudGuiovanna/tutor-mcp](https://github.com/ArnaudGuiovanna/tutor-mcp) | MIT | Ideas: adaptive tutoring architecture |
+| [zijinz456/OpenTutor](https://github.com/zijinz456/OpenTutor) | MIT | Ideas: local-first adaptive learning |
 
-If this repository later **includes** third-party source files, add their LICENSE/NOTICE under e.g. `third_party/` and list them in a NOTICE file. As of 2026-10, no such vendored code is present.
+These repositories were reviewed as prior art and architectural/pedagogical references.
+No third-party source code is currently vendored or copied into this repository.
+
+Note: a top-level MIT/Apache licence covers that project's own code; bundled datasets,
+images, or third-party libraries may carry separate terms. We only reuse **ideas/patterns**.
+
+If this repository later includes third-party source files, preserve the applicable
+LICENSE/NOTICE requirements under `third_party/` and/or a NOTICE file.
 
 ---
 

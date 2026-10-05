@@ -1,0 +1,17 @@
+[Unit]
+Description=Socratic Tutor web gateway (Tailscale)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sun
+WorkingDirectory=/home/sun/dev/tutor
+Environment=PATH=/home/sun/dev/tutor/.venv/bin:/usr/bin
+# Port 8790 — leave 8787 free for other agents if needed
+ExecStart=/home/sun/dev/tutor/.venv/bin/python -m uvicorn gateway.app:app --host 0.0.0.0 --port 8790
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
