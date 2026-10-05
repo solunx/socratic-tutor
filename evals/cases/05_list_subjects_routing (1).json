@@ -1,0 +1,18 @@
+{
+  "id": "05_list_subjects_routing",
+  "description": "Asking which subjects exist should route to list_subjects.",
+  "mode": "meta",
+  "setup": {
+    "subjects": [
+      {"id": "ai_agents", "title": "AI-agents", "goal": "agents bouwen"},
+      {"id": "zon", "title": "zon", "goal": "hoe de zon werkt"}
+    ],
+    "active": false
+  },
+  "user_message": "welke onderwerpen heb ik allemaal?",
+  "asserts": [
+    {"type": "json_valid"},
+    {"type": "routing_action_in", "values": ["list_subjects", "continue", "clarify"]},
+    {"type": "response_nonempty"}
+  ]
+}

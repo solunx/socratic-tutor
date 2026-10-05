@@ -1,0 +1,34 @@
+{
+  "id": "04_resume_retrieval",
+  "description": "On just_resumed, activity should be RETRIEVAL and response a retrieval question.",
+  "mode": "teach",
+  "setup": {
+    "subject_id": "ai_agents",
+    "subject_title": "AI-agents",
+    "goal": "agents begrijpen",
+    "concept_id": "harness",
+    "concept_title": "Harness",
+    "scores": {"knowledge": 0.5, "retrieval": 0.3, "application": 0.4, "explanation": 0.4, "transfer": 0.1},
+    "just_resumed": true,
+    "resume_instruction": "Kun je in eigen woorden reconstrueren wat de harness doet?",
+    "session_thread": "Established: harness executes. Open: error handling.",
+    "last_tutor_question": null
+  },
+  "user_message": "ik wil verder met agents",
+  "policy_expect": {
+    "activity": "RETRIEVAL",
+    "force": true
+  },
+  "asserts": [
+    {"type": "json_valid"},
+    {"type": "assessment_activity_in", "values": ["RETRIEVAL", "REVIEW"]},
+    {"type": "response_has_question_or_scaffold"},
+    {
+      "type": "response_not_contains_near",
+      "forbidden_phrases": [
+        "Laten we nieuw materiaal introduceren",
+        "Today we will learn a brand new concept"
+      ]
+    }
+  ]
+}

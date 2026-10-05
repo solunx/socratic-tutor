@@ -1,0 +1,42 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local learner data (privacy — do not push)
+learner_state.json
+learner_state.json.bak*
+*.json.bak
+
+# Optional local overrides
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+.cache/
+tmp/
+temp/
+
+# Eval / debug dumps (keep cases, ignore local runs)
+evals/.cache/
+
+# Ollama / model caches if ever linked here
+models/

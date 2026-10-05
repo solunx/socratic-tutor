@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0f1419" />
+  <title>Tutor</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --panel2: #243044;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d9cf0;
+      --tutor: #3ecf8e;
+      --you: #7aa2ff;
+      --warn: #f0c14d;
+      --danger: #f07178;
+      --radius: 14px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font-family: var(--font);
+    }
+    body {
+      display: flex; flex-direction: column;
+      max-width: 720px; margin: 0 auto;
+      min-height: 100dvh;
+    }
+    header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px;
+      background: var(--panel);
+      border-bottom: 1px solid #2a3548;
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 {
+      font-size: 1.05rem; margin: 0; font-weight: 600;
+      flex: 1;
+    }
+    .badge {
+      font-size: 0.7rem; color: var(--muted);
+      background: var(--panel2); padding: 4px 8px; border-radius: 999px;
+    }
+    .icon-btn {
+      background: var(--panel2); border: none; color: var(--text);
+      width: 36px; height: 36px; border-radius: 10px; cursor: pointer;
+      font-size: 1rem;
+    }
+    .icon-btn:active { opacity: 0.8; }
+    #sidebar {
+      display: none;
+      background: var(--panel);
+      border-bottom: 1px solid #2a3548;
+      padding: 12px 14px;
+      max-height: 40vh; overflow: auto;
+    }
+    #sidebar.open { display: block; }
+    #sidebar h2 {
+      margin: 0 0 8px; font-size: 0.8rem;
+      text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+    }
+    .subject {
+      padding: 10px 12px; margin: 0 0 8px;
+      background: var(--panel2); border-radius: 10px; cursor: pointer;
+    }
+    .subject:active { outline: 1px solid var(--accent); }
+    .subject .title { font-weight: 600; }
+    .subject .meta { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+    #log {
+      flex: 1; overflow-y: auto;
+      padding: 14px 14px 8px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .bubble {
+      max-width: 92%;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.95rem;
+    }
+    .bubble.you {
+      align-self: flex-end;
+      background: #1e3a5f;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.tutor {
+      align-self: flex-start;
+      background: #1a3d32;
+      border-bottom-left-radius: 4px;
+    }
+    .bubble.system {
+      align-self: center;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.8rem;
+      max-width: 100%;
+      text-align: center;
+    }
+    .bubble .label {
+      font-size: 0.7rem; font-weight: 600;
+      margin-bottom: 4px; opacity: 0.7;
+      text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .bubble.you .label { color: var(--you); }
+    .bubble.tutor .label { color: var(--tutor); }
+    footer {
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      background: var(--panel);
+      border-top: 1px solid #2a3548;
+      display: flex; gap: 8px; align-items: flex-end;
+    }
+    #input {
+      flex: 1; resize: none;
+      min-height: 44px; max-height: 140px;
+      padding: 10px 12px;
+      border-radius: 12px; border: 1px solid #2a3548;
+      background: var(--bg); color: var(--text);
+      font: inherit; line-height: 1.35;
+    }
+    #input:focus { outline: 1px solid var(--accent); }
+    #send {
+      background: var(--accent); color: #fff; border: none;
+      height: 44px; min-width: 44px; padding: 0 14px;
+      border-radius: 12px; font-weight: 600; cursor: pointer;
+    }
+    #send:disabled { opacity: 0.5; cursor: default; }
+    .busy { opacity: 0.6; }
+    .stats {
+      font-size: 0.7rem; color: var(--muted);
+      margin-top: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <button class="icon-btn" id="btnSubjects" title="Onderwerpen">☰</button>
+    <h1>Socratic Tutor</h1>
+    <span class="badge" id="modelBadge">…</span>
+    <button class="icon-btn" id="btnState" title="State">ⓘ</button>
+  </header>
+
+  <aside id="sidebar">
+    <h2>Onderwerpen</h2>
+    <div id="subjectList"></div>
+  </aside>
+
+  <main id="log"></main>
+
+  <footer>
+    <textarea id="input" rows="1" placeholder="Typ of plak hier… (Enter = sturen, Shift+Enter = regel)"></textarea>
+    <button id="send">↑</button>
+  </footer>
+
+  <script>
+    const sessionId = localStorage.getItem("tutor_session_id") || (() => {
+      const id = "web-" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem("tutor_session_id", id);
+      return id;
+    })();
+
+    const log = document.getElementById("log");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const sidebar = document.getElementById("sidebar");
+    const subjectList = document.getElementById("subjectList");
+    const modelBadge = document.getElementById("modelBadge");
+
+    function addBubble(role, text, extra) {
+      const div = document.createElement("div");
+      div.className = "bubble " + role;
+      if (role === "you" || role === "tutor") {
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = role === "you" ? "Jij" : "Tutor";
+        div.appendChild(label);
+      }
+      const body = document.createElement("div");
+      body.textContent = text || "";
+      div.appendChild(body);
+      if (extra) {
+        const s = document.createElement("div");
+        s.className = "stats";
+        s.textContent = extra;
+        div.appendChild(s);
+      }
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function renderSubjects(subjects) {
+      subjectList.innerHTML = "";
+      if (!subjects || !subjects.length) {
+        subjectList.innerHTML = "<div class='meta' style='color:var(--muted)'>Nog geen onderwerpen.</div>";
+        return;
+      }
+      for (const s of subjects) {
+        const el = document.createElement("div");
+        el.className = "subject";
+        el.innerHTML =
+          `<div class="title">${escapeHtml(s.title || s.id)}</div>` +
+          `<div class="meta">${escapeHtml(s.status || "")}` +
+          (s.open_mc ? ` · ${s.open_mc} open MC` : "") +
+          `</div>`;
+        el.onclick = () => {
+          sidebar.classList.remove("open");
+          input.value = "ik wil verder met " + (s.title || s.id);
+          send();
+        };
+        subjectList.appendChild(el);
+      }
+    }
+
+    function escapeHtml(t) {
+      return String(t)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function formatStats(stats) {
+      if (!stats) return "";
+      const parts = [];
+      if (stats.eval_count != null) parts.push("out=" + stats.eval_count);
+      if (stats.prompt_eval_count != null) parts.push("in=" + stats.prompt_eval_count);
+      if (stats.total_s != null) parts.push(stats.total_s + "s");
+      return parts.join(" · ");
+    }
+
+    async function bootstrap() {
+      try {
+        const r = await fetch("/api/bootstrap");
+        const data = await r.json();
+        modelBadge.textContent = data.model || "tutor";
+        renderSubjects(data.subjects || []);
+        const n = (data.subjects || []).length;
+        addBubble(
+          "system",
+          n
+            ? `Klaar · ${n} onderwerp(en). Tik ☰ of typ wat je wilt leren.`
+            : "Klaar · start met een onderwerp, bv. “ik wil agents leren”."
+        );
+      } catch (e) {
+        addBubble("system", "Kan de server niet bereiken. Draait de gateway op Tailscale?");
+      }
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      autoSize();
+      addBubble("you", text);
+      sendBtn.disabled = true;
+      input.classList.add("busy");
+
+      try {
+        const r = await fetch("/api/v1/turn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            agent: "tutor",
+            session_id: sessionId,
+            channel: "web",
+          }),
+        });
+        const data = await r.json();
+        handleResult(data);
+      } catch (e) {
+        addBubble("system", "Netwerkfout: " + e.message);
+      } finally {
+        sendBtn.disabled = false;
+        input.classList.remove("busy");
+        input.focus();
+      }
+    }
+
+    function handleResult(data) {
+      if (data.subjects) renderSubjects(data.subjects);
+
+      if (data.kind === "subjects") {
+        const names = (data.subjects || []).map((s) => s.title).join(", ") || "geen";
+        addBubble("system", "Onderwerpen: " + names);
+        if (data.response) addBubble("tutor", data.response, formatStats(data.stats));
+        return;
+      }
+
+      if (data.kind === "resume") {
+        const r = data.resume || {};
+        let head = "Hervat: " + (r.title || "");
+        if (r.goal) head += "\nLeerdoel: " + r.goal;
+        if (r.recent_concepts && r.recent_concepts.length) {
+          head += "\nRecent: " + r.recent_concepts.map((c) => c.title).join(", ");
+        }
+        addBubble("system", head);
+        if (data.response || r.resume_question) {
+          addBubble("tutor", data.response || r.resume_question, "ophalen");
+        }
+        return;
+      }
+
+      if (data.kind === "state" && data.summary) {
+        const s = data.summary;
+        const lines = [
+          "Active: " + (s.active_session && s.active_session.active
+            ? (s.active_session.subject_id + " / " + (s.active_session.concept_id || "—"))
+            : "nee"),
+          "Subjects: " + (s.subjects || []).length,
+          "Due reviews: " + (s.due_reviews || 0),
+        ];
+        if (s.active_session && s.active_session.session_thread) {
+          lines.push("Thread: " + s.active_session.session_thread);
+        }
+        addBubble("system", lines.join("\n"));
+        return;
+      }
+
+      if (data.response) {
+        addBubble("tutor", data.response, formatStats(data.stats));
+      } else if (!data.ok) {
+        addBubble("system", data.response || "Fout");
+      }
+    }
+
+    function autoSize() {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 140) + "px";
+    }
+
+    sendBtn.addEventListener("click", send);
+    input.addEventListener("input", autoSize);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+    document.getElementById("btnSubjects").onclick = () => {
+      sidebar.classList.toggle("open");
+    };
+    document.getElementById("btnState").onclick = async () => {
+      input.value = "/state";
+      send();
+    };
+
+    bootstrap();
+    input.focus();
+  </script>
+</body>
+</html>

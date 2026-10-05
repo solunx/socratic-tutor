@@ -1,0 +1,18 @@
+{
+  "id": "08_fsrs_schedule",
+  "description": "FSRS grade Again (high MC) schedules within ~1 day; Good increases stability.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon",
+    "concept_id": "kernsamenstelling",
+    "scores": {"knowledge": 0.5, "retrieval": 0.4, "application": 0.3, "explanation": 0.4, "transfer": 0.0},
+    "misconceptions": [
+      {"id": "M_HE4_FOUR_PROTONS", "description": "He-4 heeft vier protonen", "severity": "high", "status": "open"}
+    ]
+  },
+  "asserts": [
+    {"type": "fsrs_again_short_interval"},
+    {"type": "fsrs_good_grows_stability"}
+  ]
+}

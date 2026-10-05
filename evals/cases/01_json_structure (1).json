@@ -1,0 +1,23 @@
+{
+  "id": "01_json_structure",
+  "description": "Model must return valid JSON with required top-level keys.",
+  "mode": "teach",
+  "setup": {
+    "subject_id": "ai_agents",
+    "subject_title": "AI-agents",
+    "goal": "ik wil agents begrijpen",
+    "concept_id": "harness",
+    "concept_title": "Harness",
+    "scores": {"knowledge": 0.4, "retrieval": 0.3, "application": 0.3, "explanation": 0.2, "transfer": 0.0},
+    "session_thread": "Established: LLM decides, harness executes. Open: error feedback loop.",
+    "last_tutor_question": "Wat doet de harness precies?"
+  },
+  "user_message": "de harness is de code die tool calls uitvoert",
+  "asserts": [
+    {"type": "json_valid"},
+    {"type": "has_keys", "keys": ["response", "routing", "assessment", "session"]},
+    {"type": "routing_action_in", "values": ["continue", "switch", "new_subject", "list_subjects", "clarify"]},
+    {"type": "response_nonempty"},
+    {"type": "session_has_last_question"}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "11_prerequisites",
+  "description": "Weak hard prerequisite redirects policy to deeper concept before focus.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon",
+    "concept_id": "hydrostatisch_evenwicht"
+  },
+  "asserts": [
+    {"type": "prereq_redirect"}
+  ]
+}

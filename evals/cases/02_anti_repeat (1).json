@@ -1,0 +1,33 @@
+{
+  "id": "02_anti_repeat",
+  "description": "Must not re-ask substantially the same question as last_tutor_question.",
+  "mode": "teach",
+  "setup": {
+    "subject_id": "ai_agents",
+    "subject_title": "AI-agents",
+    "goal": "agents bouwen",
+    "concept_id": "harness",
+    "concept_title": "Harness",
+    "scores": {"knowledge": 0.5, "retrieval": 0.4, "application": 0.5, "explanation": 0.4, "transfer": 0.1},
+    "session_thread": "Established: harness executes tool calls. Open: how error JSON is used.",
+    "last_tutor_question": "Wat moet er in de JSON staan zodat de LLM weet dat de vorige tool-call mislukte?",
+    "recent_questions": [
+      "Wat moet er in de JSON staan zodat de LLM weet dat de vorige tool-call mislukte?",
+      "Waarom is de foutmelding specifiek belangrijk?"
+    ]
+  },
+  "user_message": "er moet een samenvatting van eerdere acties en resultaten in de json staan",
+  "asserts": [
+    {"type": "json_valid"},
+    {"type": "response_nonempty"},
+    {
+      "type": "response_not_contains_near",
+      "forbidden_phrases": [
+        "Wat moet er in de JSON staan zodat de LLM weet dat de vorige tool-call mislukte",
+        "wat moet er in de json staan zodat de llm weet"
+      ],
+      "note": "anti-repeat of last question"
+    },
+    {"type": "session_has_last_question"}
+  ]
+}

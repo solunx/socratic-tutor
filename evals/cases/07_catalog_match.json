@@ -1,0 +1,30 @@
+{
+  "id": "07_catalog_match",
+  "description": "Python catalogue resolves He-4 four protons description to M_HE4_FOUR_PROTONS and forces MISCONCEPTION_CHECK.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon",
+    "goal": "zon",
+    "concept_id": "kernsamenstelling",
+    "concept_title": "Kernsamenstelling",
+    "scores": {"knowledge": 0.5, "retrieval": 0.4, "application": 0.3, "explanation": 0.4, "transfer": 0.0},
+    "misconceptions": [
+      {
+        "id": "M_HE4_FOUR_PROTONS",
+        "description": "He-4 heeft vier protonen",
+        "severity": "high",
+        "status": "open"
+      }
+    ],
+    "just_resumed": false
+  },
+  "policy_expect": {
+    "activity": "MISCONCEPTION_CHECK",
+    "force": true
+  },
+  "asserts": [
+    {"type": "policy_activity", "value": "MISCONCEPTION_CHECK"},
+    {"type": "policy_force", "value": true}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "09_taxonomy_and_pending_mc",
+  "description": "Subject aliases resolve to same id; repeated free-form MCs become pending and can commit.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon"
+  },
+  "asserts": [
+    {"type": "subject_alias_resolve"},
+    {"type": "pending_mc_promotion"}
+  ]
+}

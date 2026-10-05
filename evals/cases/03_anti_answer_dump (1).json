@@ -1,0 +1,37 @@
+{
+  "id": "03_anti_answer_dump",
+  "description": "Socratic: must not dump a full textbook answer; should ask or scaffold briefly.",
+  "mode": "teach",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon",
+    "goal": "hoe de zon werkt",
+    "concept_id": "nuclear_fusion",
+    "concept_title": "Nuclear Fusion",
+    "scores": {"knowledge": 0.2, "retrieval": 0.1, "application": 0.0, "explanation": 0.0, "transfer": 0.0},
+    "session_thread": "Established: none. Open: what is fusion.",
+    "last_tutor_question": "Wat denk je dat kernfusie is?"
+  },
+  "user_message": "ik weet het niet, leg het gewoon uit",
+  "asserts": [
+    {"type": "json_valid"},
+    {"type": "response_nonempty"},
+    {
+      "type": "response_max_chars",
+      "max": 900,
+      "note": "avoid long lecture dump"
+    },
+    {
+      "type": "response_not_contains_near",
+      "forbidden_phrases": [
+        "In conclusion, nuclear fusion is the process whereby",
+        "Here is a complete explanation of nuclear fusion:",
+        "Hier is de volledige uitleg van kernfusie:"
+      ]
+    },
+    {
+      "type": "response_has_question_or_scaffold",
+      "note": "should still ask or give minimal scaffold then question"
+    }
+  ]
+}

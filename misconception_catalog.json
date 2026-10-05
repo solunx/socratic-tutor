@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "description": "Named misconception catalogue. Prefer these ids in assessment.misconceptions[].id when the learner's answer matches. Free-form descriptions remain allowed.",
+  "entries": [
+    {
+      "id": "M_HE4_FOUR_PROTONS",
+      "concepts": ["kernsamenstelling", "nuclear_fusion"],
+      "subjects": ["zon"],
+      "label": "He-4 heeft vier protonen",
+      "pattern": "Student treats He-4 as four protons (confuses mass number A with atomic number Z).",
+      "keywords": ["4 proton"],
+      "severity": "high",
+      "remediation_hint": "Vraag: wat is Z van helium, en wat is A? Hoeveel protonen vs neutronen in He-4?"
+    },
+    {
+      "id": "M_HE_Z_EQUALS_1",
+      "concepts": ["kernsamenstelling", "nuclear_fusion"],
+      "subjects": ["zon"],
+      "label": "Atoomnummer van helium is 1",
+      "pattern": "Student assigns Z=1 to helium.",
+      "severity": "high",
+      "remediation_hint": "Koppel Z aan aantal protonen; helium staat in het periodiek systeem bij Z=2."
+    },
+    {
+      "id": "M_MASS_DEFECT_INCREASES",
+      "concepts": ["kernsamenstelling", "nuclear_fusion"],
+      "subjects": ["zon"],
+      "label": "Massa neemt toe bij fusie",
+      "pattern": "Student concludes mass increases in fusion instead of mass defect releasing energy.",
+      "severity": "high",
+      "remediation_hint": "Vraag of de productkern lichter of zwaarder is dan de som van de deeltjes, en waar de energie vandaan komt."
+    },
+    {
+      "id": "M_ELECTRONS_IN_MASS_DEFECT",
+      "concepts": ["kernsamenstelling", "nuclear_fusion"],
+      "subjects": ["zon"],
+      "label": "Elektronen als bron van massadefect",
+      "pattern": "Student focuses on electrons rather than nuclear mass when explaining mass defect.",
+      "severity": "medium",
+      "remediation_hint": "Scheid atomaire vs nucleaire massa; focus op protonen+neutronen in de kern."
+    },
+    {
+      "id": "M_PROTON_NEUTRON_CONFUSION",
+      "concepts": ["nuclear_fusion", "kernsamenstelling"],
+      "subjects": ["zon"],
+      "label": "Verwarring proton vs neutron",
+      "pattern": "Student confuses protons and neutrons or their roles in fusion.",
+      "severity": "high",
+      "remediation_hint": "Korte feitelijke scaffold: lading en massa, dan terug naar de fusiereactie."
+    },
+    {
+      "id": "M_STRONG_FORCE_DISTANCE_ONLY",
+      "concepts": ["sterke_kernkracht"],
+      "subjects": ["zon"],
+      "label": "Sterke kracht zwakker alleen door afstand",
+      "pattern": "Student says strong force weakens mainly because nucleons are farther apart, missing short-range vs long-range EM growth.",
+      "severity": "medium",
+      "remediation_hint": "Vraag: voelt een nucleon alle anderen via de sterke kracht, of vooral buren? En de EM-afstoting?"
+    },
+    {
+      "id": "M_LIGHT_STAR_JUST_COOLS",
+      "concepts": ["sterke_kernkracht", "hydrostatisch_evenwicht"],
+      "subjects": ["zon"],
+      "label": "Lichte ster koelt gewoon af na fusie-stop",
+      "pattern": "Student says a light star just cools after fusion stops, omitting degeneracy pressure / white dwarf support.",
+      "severity": "medium",
+      "remediation_hint": "Vraag welke kracht de ineenstorting stopt als fusiedruk wegvalt (Pauli / degenerate druk)."
+    },
+    {
+      "id": "M_SUPPORT_IS_NUCLEAR_EM",
+      "concepts": ["sterke_kernkracht", "hydrostatisch_evenwicht"],
+      "subjects": ["zon"],
+      "label": "Tegenkracht is kernkracht+EM op ster-schaal",
+      "pattern": "Student claims nuclear+EM forces balance gravity at stellar scale instead of degeneracy pressure.",
+      "severity": "medium",
+      "remediation_hint": "Onderscheid krachten binnen de kern vs krachten die de ster als geheel ondersteunen."
+    },
+    {
+      "id": "M_DEGENERACY_IS_CLASSICAL_SPEED",
+      "concepts": ["sterke_kernkracht"],
+      "subjects": ["zon"],
+      "label": "Degenerate druk = klassiek sneller bewegen",
+      "pattern": "Student explains electron/neutron degeneracy pressure purely as classical kinetic speed, not Pauli exclusion.",
+      "severity": "medium",
+      "remediation_hint": "Koppel uitsluitingsprincipe → hogere momentum-toestanden → druk, niet alleen 'sneller botsen'."
+    },
+    {
+      "id": "M_NEUTRON_PRESSURE_IS_MASS",
+      "concepts": ["sterke_kernkracht"],
+      "subjects": ["zon"],
+      "label": "Neutronendruk door massa/ruimte",
+      "pattern": "Student attributes neutron degeneracy pressure to mass occupying space, not quantum statistics.",
+      "severity": "medium",
+      "remediation_hint": "Vraag waarom identieke fermionen niet dezelfde toestand kunnen delen."
+    },
+    {
+      "id": "M_HYDRO_FORCE_ENERGY_CONFUSION",
+      "concepts": ["hydrostatisch_evenwicht"],
+      "subjects": ["zon"],
+      "label": "Verwarring kracht vs energie in evenwicht",
+      "pattern": "Student confuses the forces in hydrostatic balance with energy production language (e.g. vague 'strakke energie').",
+      "severity": "high",
+      "remediation_hint": "Vraag expliciet naar twee tegengestelde krachten (zwaartekracht vs druk), niet naar energie als kracht."
+    },
+    {
+      "id": "M_LLM_HAS_MEMORY",
+      "concepts": ["harness", "agent", "tool_use"],
+      "subjects": ["ai_agents"],
+      "label": "LLM onthoudt eerdere tool-calls zelf",
+      "pattern": "Student assumes the LLM remembers prior steps without harness-supplied context/summary in each JSON.",
+      "severity": "high",
+      "remediation_hint": "Vraag wat er in de JSON moet staan als de LLM geen geheugen heeft tussen calls."
+    },
+    {
+      "id": "M_HARNESS_ONLY_FORWARDS",
+      "concepts": ["harness"],
+      "subjects": ["ai_agents"],
+      "label": "Harness is alleen doorgeefluik",
+      "pattern": "Student treats harness as passive pipe; misses policy, blocking, and error shaping.",
+      "severity": "medium",
+      "remediation_hint": "Scenario: tool-call zonder toestemming — wie beslist en wat gaat terug naar de LLM?"
+    }
+  ]
+}

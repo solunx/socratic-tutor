@@ -1,0 +1,12 @@
+{
+  "id": "10_llm_taxonomy_apply",
+  "description": "Python applies routing.taxonomy parent/related/aliases without deleting subjects.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "zon",
+    "subject_title": "zon"
+  },
+  "asserts": [
+    {"type": "taxonomy_apply"}
+  ]
+}
