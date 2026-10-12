@@ -49,6 +49,26 @@ DEFAULT_SESSION_MINUTES = 30
 MAX_HISTORY_ENTRIES = 40          # session breadcrumbs only
 MAX_EVIDENCE_PER_CONCEPT = 8      # recent evidence windows
 MAX_MISCONCEPTIONS_PER_CONCEPT = 8
+
+CONCEPT_PARENT_DEFAULTS = {
+    "zon": {
+        "quantum_tunneling": "nuclear_fusion",
+        "kernsamenstelling": "nuclear_fusion",
+        "sterke_kernkracht": "nuclear_fusion",
+        "hydrostatisch_evenwicht": "nuclear_fusion",
+        "energieniveaus": "kernsamenstelling",
+        "spectrale_lijnen": "energieniveaus",
+        "zwakke_kernkracht": "nuclear_fusion",
+        "pp_chain": "nuclear_fusion",
+        "coulomb_barriere": "quantum_tunneling",
+    },
+    "ai_agents": {
+        "tool_use": "agent",
+        "harness": "agent",
+    },
+}
+
+
 MAX_OUTPUT_TOKENS = 700           # phase-3: room for full JSON (response+routing+assessment+session)
 
 
@@ -187,6 +207,8 @@ def prune_learner_state(state):
     - history: last MAX_HISTORY_ENTRIES only
     - evidence: last MAX_EVIDENCE_PER_CONCEPT per concept
     - misconceptions: prefer open/improving; drop oldest resolved beyond cap
+    - active_session.open_threads: drop closed threads older than the last 3 open/scaffolded
+    - stale open MCs (>30 days, medium, no remediation activity) → improving (hygiene)
     Does NOT delete subjects, concepts, dimension scores, or FSRS fields.
     """
     if not isinstance(state, dict):
@@ -195,6 +217,16 @@ def prune_learner_state(state):
     if isinstance(hist, list) and len(hist) > MAX_HISTORY_ENTRIES:
         state["history"] = hist[-MAX_HISTORY_ENTRIES:]
 
+    # Compact open_threads: keep open/scaffolded + last few closed
+    active = state.get("active_session")
+    if isinstance(active, dict):
+        threads = active.get("open_threads")
+        if isinstance(threads, list) and len(threads) > 6:
+            opens = [t for t in threads if isinstance(t, dict) and t.get("status") in ("open", "scaffolded", "hinted")]
+            closed = [t for t in threads if isinstance(t, dict) and t.get("status") == "closed"]
+            active["open_threads"] = (opens + closed)[-6:]
+
+    now = datetime.now()
     for sub in (state.get("subjects") or {}).values():
         if not isinstance(sub, dict):
             continue
@@ -205,9 +237,29 @@ def prune_learner_state(state):
             if isinstance(ev, list) and len(ev) > MAX_EVIDENCE_PER_CONCEPT:
                 concept["evidence"] = ev[-MAX_EVIDENCE_PER_CONCEPT:]
             mcs = concept.get("misconceptions")
-            if not isinstance(mcs, list) or len(mcs) <= MAX_MISCONCEPTIONS_PER_CONCEPT:
+            if not isinstance(mcs, list):
                 continue
-            # Keep all non-resolved; fill with newest resolved if room
+            # Hygiene: very old open medium MCs without id → mark improving (stop force loops)
+            for m in mcs:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("status", "open") != "open":
+                    continue
+                if str(m.get("severity", "")).lower() == "high":
+                    continue  # high stays until explicitly resolved
+                created = m.get("created_at")
+                if not created:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(created).replace("Z", ""))
+                    age_days = (now - dt).days
+                except Exception:
+                    continue
+                if age_days >= 30:
+                    m["status"] = "improving"
+                    m["resolved_hint"] = m.get("resolved_hint") or "auto: stale open MC (>30d)"
+            if len(mcs) <= MAX_MISCONCEPTIONS_PER_CONCEPT:
+                continue
             openish = [m for m in mcs if isinstance(m, dict) and m.get("status", "open") != "resolved"]
             resolved = [m for m in mcs if isinstance(m, dict) and m.get("status") == "resolved"]
             strings = [m for m in mcs if not isinstance(m, dict)]
@@ -216,13 +268,42 @@ def prune_learner_state(state):
             if room > 0:
                 kept.extend(resolved[-room:])
             else:
-                # too many open: keep most recent openish
                 kept = kept[-MAX_MISCONCEPTIONS_PER_CONCEPT:]
             concept["misconceptions"] = kept
     return state
 
 
+
+def clamp_fsrs_fields(state):
+    """Prevent runaway FSRS stability from noisy grades / /state turns."""
+    for sub in (state.get("subjects") or {}).values():
+        if not isinstance(sub, dict):
+            continue
+        for c in (sub.get("concepts") or {}).values():
+            if not isinstance(c, dict):
+                continue
+            st = c.get("stability")
+            if isinstance(st, (int, float)) and st > 3650:  # ~10 years max
+                c["stability"] = 3650.0
+            diff = c.get("difficulty")
+            if isinstance(diff, (int, float)):
+                c["difficulty"] = max(1.0, min(10.0, float(diff)))
+    return state
+
+
 def save_state(state):
+    try:
+        hygiene_misconceptions(state)
+    except Exception:
+        pass
+    try:
+        clamp_fsrs_fields(state)
+    except Exception:
+        pass
+    try:
+        ensure_concept_tree(state)
+    except Exception:
+        pass
     prune_learner_state(state)
     atomic_save_json(STATE_FILE, state)
 
@@ -620,6 +701,17 @@ def ensure_concept(state, subject_id, concept_id):
             break
 
     if concept_id not in concepts:
+        parent_guess = None
+        defaults = CONCEPT_PARENT_DEFAULTS.get(subject_id) or {}
+        parent_guess = defaults.get(concept_id)
+        active = state.get("active_session") or {}
+        if not parent_guess and active.get("subject_id") == subject_id:
+            cur = active.get("current_concept_id")
+            if cur and cur in concepts and cur != concept_id:
+                # new concept under current focus as soft parent only if default says so
+                parent_guess = defaults.get(concept_id) or None
+        if parent_guess and parent_guess not in concepts:
+            parent_guess = None
         concepts[concept_id] = {
             "title": concept_id.replace("_", " ").title(),
             "knowledge": 0.0,
@@ -641,9 +733,9 @@ def ensure_concept(state, subject_id, concept_id):
             "last_review": None,
             "last_grade": None,
             # Taxonomy
-            "parent_concept_id": None,
+            "parent_concept_id": parent_guess,
             "aliases": [],
-            "prerequisites": [],
+            "prerequisites": ([{"id": parent_guess, "strength": "soft"}] if parent_guess else []),
         }
     else:
         concepts[concept_id].setdefault("parent_concept_id", None)
@@ -899,13 +991,148 @@ def suggest_next_activity(state):
             "force": False,
         }
 
+    # 0a) Explicit "leg uit" or repeated stuck → FULL TEACH then close thread
+    if active.get("force_full_teach"):
+        active["force_full_teach"] = False
+        active["force_scaffold"] = False
+        active["stuck_signal"] = False
+        ot = get_open_thread(active)
+        focus_q = (ot or {}).get("q") if ot else None
+        if ot:
+            ot["status"] = "closed"
+            ot["closed_reason"] = "full_teach"
+        return {
+            "activity": "EXPLANATION",
+            "concept_id": cid,
+            "subject_id": sid,
+            "reason": (
+                "FULL TEACH / SLOW: learner asked explanation, formula, or slow-down. "
+                "Max ONE new technical term this turn, defined in plain words first. "
+                "No misleading analogy. No chain of new jargon in one reply. "
+                "Close the open gap, then ONE easy check on a NEW angle."
+                + (f" | thread: {focus_q[:70]}" if focus_q else "")
+            ),
+            "force": True,
+            "scaffold": True,
+            "full_teach": True,
+            "close_thread": True,
+            "open_thread_q": focus_q,
+        }
+
+    # 0a2) Soft stuck → scaffold once (not endless re-ask)
+    if active.get("force_scaffold") or active.get("stuck_signal"):
+        active["force_scaffold"] = False
+        active["stuck_signal"] = False
+        mark_thread_scaffolded(active)
+        ot = get_open_thread(active)
+        focus_q = (ot or {}).get("q") if ot else None
+        tries = int((ot or {}).get("tries") or 0)
+        # If already scaffolded many times, escalate to full teach
+        if tries >= 3:
+            if ot:
+                ot["status"] = "closed"
+                ot["closed_reason"] = "full_teach_after_tries"
+            return {
+                "activity": "EXPLANATION",
+                "concept_id": cid,
+                "subject_id": sid,
+                "reason": (
+                    "FULL TEACH after failed scaffolds — answer completely "
+                    "using learner's partial ideas, close thread, easy check"
+                ),
+                "force": True,
+                "full_teach": True,
+                "close_thread": True,
+                "open_thread_q": focus_q,
+            }
+        return {
+            "activity": "EXPLANATION",
+            "concept_id": cid,
+            "subject_id": sid,
+            "reason": (
+                "learner stuck — build on what THEY already said, add one missing "
+                "piece (2–4 sentences), then ONE simpler question"
+                + (f" | {focus_q[:70]}" if focus_q else "")
+            ),
+            "force": True,
+            "scaffold": True,
+            "open_thread_q": focus_q,
+        }
+
+    # 0b) Open thread: after 3 tries → FULL TEACH and CLOSE (stop the loop)
+    ot = get_open_thread(active)
+    if ot and int(ot.get("tries") or 0) >= 3 and ot.get("status") != "closed":
+        focus_q = ot.get("q")
+        ot["status"] = "closed"
+        ot["closed_reason"] = "max_tries_full_teach"
+        return {
+            "activity": "EXPLANATION",
+            "concept_id": cid,
+            "subject_id": sid,
+            "reason": (
+                f"FULL TEACH — open thread tries={ot.get('tries')}: give the answer "
+                f"now (use learner's analogies), close gap, ONE easy check — "
+                f"{(focus_q or '')[:80]}"
+            ),
+            "force": True,
+            "full_teach": True,
+            "close_thread": True,
+            "open_thread_q": focus_q,
+        }
+    # tries 1–2: stay on thread but BUILD ON learner words, not pure re-ask
+    if ot and int(ot.get("tries") or 0) >= 1 and active.get("must_advance"):
+        active["must_advance"] = False
+        return {
+            "activity": "EXPLANATION",
+            "concept_id": cid,
+            "subject_id": sid,
+            "reason": (
+                "open thread — quote/accept what learner got right, add ONE missing "
+                f"piece, do not re-ask the same question: {(ot.get('q') or '')[:80]}"
+            ),
+            "force": True,
+            "scaffold": True,
+            "open_thread_q": ot.get("q"),
+        }
+
+    # 0b) After a correct (or solid partial) answer: advance activity type.
+    # Domain-agnostic: do not re-quiz the same explanation angle.
+    verdict = str(active.get("last_verdict") or "").lower()
+    if verdict in ("correct", "ok") or (
+        verdict == "partial" and int(active.get("same_activity_streak") or 0) >= 1
+    ):
+        last_act = (active.get("current_activity") or active.get("prev_activity") or "").upper()
+        if last_act in ("EXPLANATION", "RETRIEVAL", "MISCONCEPTION_CHECK", ""):
+            # Prefer application, then transfer if application already strong
+            nxt = "APPLICATION"
+            if concept:
+                try:
+                    app = float(concept.get("application") or 0)
+                    tr = float(concept.get("transfer") or 0)
+                    if app >= 0.45 and tr < 0.45:
+                        nxt = "TRANSFER"
+                    elif app >= 0.45 and tr >= 0.45:
+                        nxt = "RETRIEVAL"  # spaced light check, not same explain
+                except Exception:
+                    pass
+            active["last_verdict"] = None  # consume so we don't loop this forever
+            return {
+                "activity": nxt,
+                "concept_id": cid,
+                "subject_id": sid,
+                "reason": (
+                    f"verdict was {verdict} — advance to {nxt} on a NEW angle "
+                    "(do not re-ask the same 'explain why' check)"
+                ),
+                "force": True,
+            }
+
     # 0) Hard anti-repeat / activity-loop break (Python-enforced)
     if active.get("must_advance") or int(active.get("same_activity_streak") or 0) >= 3:
         active["must_advance"] = False
         last_act = active.get("current_activity") or active.get("prev_activity")
-        # Pick a different activity than the one that was looping
-        candidates = ["APPLICATION", "EXPLANATION", "RETRIEVAL", "TRANSFER"]
-        nxt = next((a for a in candidates if a != last_act), "APPLICATION")
+        candidates = ["EXPLANATION", "APPLICATION", "RETRIEVAL"]
+        nxt = next((a for a in candidates if a != last_act), "EXPLANATION")
         streak = int(active.get("repeat_streak") or 0)
         active["same_activity_streak"] = 0
         return {
@@ -977,6 +1204,8 @@ def suggest_next_activity(state):
         }
 
     # 5) Weakest dimension on focus concept
+    # IMPORTANT: do not push TRANSFER while K/R/E are still thin — that
+    # produces endless "compare to another phenomenon" loops.
     if concept:
         scores = {}
         for d in DIMENSIONS:
@@ -985,6 +1214,19 @@ def suggest_next_activity(state):
         weakest = min(scores, key=scores.get)
         if scores[weakest] < WEAK_DIM_THRESHOLD:
             act = DIM_TO_ACTIVITY.get(weakest, "RETRIEVAL")
+            foundation = min(
+                scores.get("knowledge", 0),
+                scores.get("retrieval", 0),
+                scores.get("explanation", 0),
+            )
+            if act == "TRANSFER" and foundation < 0.5:
+                # Rebuild understanding first; transfer later
+                act = "EXPLANATION" if scores.get("explanation", 0) < 0.5 else "APPLICATION"
+            # Cap consecutive TRANSFER even when foundation is OK
+            prev = (active.get("current_activity") or active.get("prev_activity") or "")
+            same = int(active.get("same_activity_streak") or 0)
+            if act == "TRANSFER" and prev == "TRANSFER" and same >= 1:
+                act = "APPLICATION"
             return {
                 "activity": act,
                 "concept_id": cid,
@@ -1417,6 +1659,18 @@ def apply_prerequisite_proposals(state, subject_id, concept_id, prereq_list):
         if not pid or pid == concept_id or pid not in concepts:
             continue
         if pid in existing:
+            # Upgrade soft → hard if proposed stronger; never downgrade.
+            if strength == "hard":
+                for e in edges:
+                    if isinstance(e, dict):
+                        eid = normalize_id(e.get("id") or e.get("concept_id") or "")
+                        if eid == pid and str(e.get("strength") or "soft").lower() != "hard":
+                            e["strength"] = "hard"
+                            notes.append(f"prereq upgrade: {concept_id} ← {pid} (hard)")
+                    elif isinstance(e, str) and normalize_id(e) == pid:
+                        idx = edges.index(e)
+                        edges[idx] = {"id": pid, "strength": "hard"}
+                        notes.append(f"prereq upgrade: {concept_id} ← {pid} (hard)")
             continue
         # No immediate cycle: prereq must not list concept as its prereq
         pre_edges = concepts[pid].get("prerequisites") or []
@@ -1759,8 +2013,204 @@ def commit_pending_to_catalog(state, min_count=None):
 
 def maybe_curate_misconceptions(state):
     """Run pending update + optional auto-commit. Called after assessments."""
+    hygiene_misconceptions(state)
     update_pending_catalog(state)
     return commit_pending_to_catalog(state)
+
+
+def hygiene_misconceptions(state):
+    """Dedupe, merge near-duplicates, age out stale opens — prevent MC wildgrowth.
+
+    - Same fingerprint within one concept → keep newest, merge severity (max)
+    - Near-duplicate descriptions (token Jaccard ≥ 0.55) → merge into one
+    - Medium/low open older than 14 days → improving
+    - Medium/low open older than 45 days → resolved (noise)
+    - High open older than 60 days with no evidence string → improving
+    - Cap still applied in prune_learner_state
+    """
+    if not isinstance(state, dict):
+        return 0
+    now = datetime.now()
+    changed = 0
+
+    def _age_days(m):
+        created = m.get("created_at")
+        if not created:
+            return 0
+        try:
+            dt = datetime.fromisoformat(str(created).replace("Z", ""))
+            return max(0, (now - dt).days)
+        except Exception:
+            return 0
+
+    def _sev_rank(s):
+        return {"high": 3, "medium": 2, "low": 1}.get(str(s or "medium").lower(), 2)
+
+    for sid, sub in (state.get("subjects") or {}).items():
+        if not isinstance(sub, dict):
+            continue
+        for cid, concept in (sub.get("concepts") or {}).items():
+            if not isinstance(concept, dict):
+                continue
+            mcs = concept.get("misconceptions")
+            if not isinstance(mcs, list) or not mcs:
+                continue
+
+            # 1) Age statuses
+            for m in mcs:
+                if not isinstance(m, dict):
+                    continue
+                st = m.get("status", "open")
+                if st == "resolved":
+                    continue
+                age = _age_days(m)
+                sev = str(m.get("severity") or "medium").lower()
+                if st == "open" and sev in ("medium", "low") and age >= 7:
+                    m["status"] = "improving"
+                    m["resolved_hint"] = m.get("resolved_hint") or "auto: aged open→improving"
+                    changed += 1
+                elif st in ("open", "improving") and sev in ("medium", "low") and age >= 21:
+                    m["status"] = "resolved"
+                    m["resolved_hint"] = m.get("resolved_hint") or "auto: stale MC closed"
+                    changed += 1
+                elif st == "open" and sev == "high" and age >= 30:
+                    # High stays open longer, but not forever without recovery
+                    m["status"] = "improving"
+                    m["resolved_hint"] = m.get("resolved_hint") or "auto: aged high→improving"
+                    changed += 1
+                elif st == "improving" and sev == "high" and age >= 60:
+                    m["status"] = "resolved"
+                    m["resolved_hint"] = m.get("resolved_hint") or "auto: stale high closed"
+                    changed += 1
+
+            # 2) Dedupe by fingerprint / near-duplicate description
+            kept = []
+            for m in mcs:
+                if not isinstance(m, dict):
+                    kept.append(m)
+                    continue
+                fp = _mc_fingerprint(m.get("description"), m.get("id"))
+                desc_tokens = set(re.findall(r"[a-z0-9à-ÿ]+", str(m.get("description") or "").lower()))
+                merged = False
+                for k in kept:
+                    if not isinstance(k, dict):
+                        continue
+                    if k.get("status") == "resolved" and m.get("status") != "resolved":
+                        # prefer keeping active over resolved duplicate
+                        pass
+                    kfp = _mc_fingerprint(k.get("description"), k.get("id"))
+                    if fp and kfp and fp == kfp:
+                        # merge into k
+                        if _sev_rank(m.get("severity")) > _sev_rank(k.get("severity")):
+                            k["severity"] = m.get("severity")
+                        # keep more active status
+                        order = {"open": 0, "improving": 1, "resolved": 2}
+                        if order.get(m.get("status", "open"), 9) < order.get(k.get("status", "open"), 9):
+                            k["status"] = m.get("status")
+                        if m.get("id") and not k.get("id"):
+                            k["id"] = m.get("id")
+                        if m.get("evidence") and not k.get("evidence"):
+                            k["evidence"] = m.get("evidence")
+                        merged = True
+                        changed += 1
+                        break
+                    k_tokens = set(re.findall(r"[a-z0-9à-ÿ]+", str(k.get("description") or "").lower()))
+                    if desc_tokens and k_tokens:
+                        j = len(desc_tokens & k_tokens) / max(len(desc_tokens | k_tokens), 1)
+                        d1 = str(m.get("description") or "").lower()[:80]
+                        d2 = str(k.get("description") or "").lower()[:80]
+                        prefix_hit = len(d1) > 30 and (d1 in d2 or d2 in d1)
+                        if j >= 0.45 or prefix_hit:
+                            if _sev_rank(m.get("severity")) > _sev_rank(k.get("severity")):
+                                k["severity"] = m.get("severity")
+                            order = {"open": 0, "improving": 1, "resolved": 2}
+                            if order.get(m.get("status", "open"), 9) < order.get(k.get("status", "open"), 9):
+                                k["status"] = m.get("status")
+                            # prefer longer description
+                            if len(str(m.get("description") or "")) > len(str(k.get("description") or "")):
+                                k["description"] = m.get("description")
+                            if m.get("id") and not k.get("id"):
+                                k["id"] = m.get("id")
+                            merged = True
+                            changed += 1
+                            break
+                if not merged:
+                    kept.append(m)
+            concept["misconceptions"] = kept
+    return changed
+
+
+# Default concept parent map (subject-local). Used when parent_concept_id is null.
+
+def ensure_concept_tree(state, subject_id=None):
+    """Fill parent_concept_id from defaults + session focus; no cycles.
+
+    Also adds soft related links between sibling concepts under same parent.
+    Safe to call often; only writes when parent is missing.
+    """
+    subjects = state.get("subjects") or {}
+    sids = [subject_id] if subject_id else list(subjects.keys())
+    notes = []
+    for sid in sids:
+        sid = normalize_id(sid) if sid else None
+        if not sid or sid not in subjects:
+            continue
+        concepts = subjects[sid].get("concepts") or {}
+        defaults = CONCEPT_PARENT_DEFAULTS.get(sid) or {}
+        # Also: if current focus has no parent and we just came from another concept, soft-link
+        active = state.get("active_session") or {}
+        focus = active.get("current_concept_id")
+        for cid, cpt in concepts.items():
+            if not isinstance(cpt, dict):
+                continue
+            parent = cpt.get("parent_concept_id")
+            if parent:
+                # validate still exists
+                if parent not in concepts:
+                    cpt["parent_concept_id"] = None
+                    parent = None
+                else:
+                    continue
+            # defaults table
+            want = defaults.get(cid)
+            if want and want in concepts and want != cid:
+                cpt["parent_concept_id"] = want
+                notes.append(f"{sid}/{cid} → {want}")
+                continue
+            # heuristic: if name contains known parent token
+            for p_candidate in concepts:
+                if p_candidate == cid:
+                    continue
+                if p_candidate in cid or (len(p_candidate) > 4 and p_candidate in str(cpt.get("title") or "").lower().replace(" ", "_")):
+                    # weak; only if default missing
+                    pass
+        # prerequisites soft: child should list parent as soft prereq
+        for cid, cpt in concepts.items():
+            if not isinstance(cpt, dict):
+                continue
+            parent = cpt.get("parent_concept_id")
+            if not parent or parent not in concepts:
+                continue
+            prereqs = cpt.setdefault("prerequisites", [])
+            # normalize to list of {id, strength}
+            ids = set()
+            for p in prereqs:
+                if isinstance(p, str):
+                    ids.add(normalize_id(p))
+                elif isinstance(p, dict) and p.get("id"):
+                    ids.add(normalize_id(p["id"]))
+            if parent not in ids:
+                prereqs.append({"id": parent, "strength": "soft"})
+                notes.append(f"prereq soft: {cid} needs {parent}")
+    if notes:
+        state.setdefault("meta", {}).setdefault("taxonomy_events", []).append({
+            "date": datetime.now().isoformat(),
+            "type": "concept_tree",
+            "notes": notes[:20],
+        })
+        events = state["meta"].get("taxonomy_events") or []
+        state["meta"]["taxonomy_events"] = events[-40:]
+    return notes
 
 
 def link_subjects(state, child_id, parent_id, related=False):
@@ -1851,61 +2301,77 @@ def update_dimension(
 
 
 
-def _auto_resolve_misconceptions(concept, assessment):
-    """Demote open MCs when the learner demonstrates recovery."""
+def _auto_resolve_misconceptions(concept, assessment, verdict=None):
+    """Demote open MCs when the learner demonstrates recovery.
+
+    Domain-agnostic: uses verdict, mastery, and LLM-reported MC status —
+    never topic-specific keyword lists.
+    """
     if not concept:
-        return
+        return 0
+    changed = 0
     dims = (assessment or {}).get("dimensions") or {}
     scores = [clamp(dims.get(d)) for d in DIMENSIONS if clamp(dims.get(d)) is not None]
     mastery = average_mastery(concept)
     turn_ok = (sum(scores) / len(scores)) >= 0.45 if scores else False
-    solid = mastery >= 0.45 or turn_ok
-    evidence = str((assessment or {}).get("evidence") or "").lower()
-    correct_signals = any(
-        s in evidence
-        for s in (
-            "correctly", "z=2", "z=1", "2 protons", "2 protonen",
-            "a=4", "a=2", "a=3", "resolved", "klopt",
-        )
+    verdict = str(verdict or (assessment or {}).get("verdict") or "").lower()
+    solid = (
+        verdict in ("correct", "true", "ok")
+        or mastery >= 0.45
+        or turn_ok
     )
+
+    # Explicit statuses from model assessment first
+    for item in (assessment or {}).get("misconceptions") or []:
+        if not isinstance(item, dict):
+            continue
+        want = str(item.get("status") or "").lower()
+        if want not in ("resolved", "improving"):
+            continue
+        for m in concept.get("misconceptions") or []:
+            if not isinstance(m, dict):
+                continue
+            if m.get("status") == "resolved":
+                continue
+            match = False
+            if item.get("id") and item.get("id") == m.get("id"):
+                match = True
+            else:
+                idesc = str(item.get("description") or "").lower()
+                desc = str(m.get("description") or "").lower()
+                if idesc and desc and (idesc[:40] in desc or desc[:40] in idesc):
+                    match = True
+            if match and m.get("status") != want:
+                m["status"] = want
+                m["resolved_hint"] = m.get("resolved_hint") or f"auto: assessment→{want}"
+                changed += 1
+
+    if not solid:
+        return changed
+
+    # After a solid turn: open medium/low → improving; high → improving
+    # if mastery already decent. Full resolve needs stronger mastery.
     for m in concept.get("misconceptions") or []:
         if not isinstance(m, dict):
             continue
         st = m.get("status", "open")
         if st == "resolved":
             continue
-        sev = str(m.get("severity", "")).lower()
-        desc = str(m.get("description", "")).lower()
-        # Explicit model status
-        for item in (assessment or {}).get("misconceptions") or []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("status") not in ("resolved", "improving"):
-                continue
-            if item.get("id") and item.get("id") == m.get("id"):
-                m["status"] = item["status"]
-                break
-            idesc = str(item.get("description") or "").lower()
-            if idesc and idesc[:30] in desc:
-                m["status"] = item["status"]
-                break
-        else:
-            if not solid:
-                continue
-            za = any(
-                k in desc
-                for k in (
-                    "massagetal", "atoomnummer", "helium-4", "he-4",
-                    "vier protonen", "four protons", "elektronen",
-                )
-            )
-            if sev == "high" and (za or correct_signals):
-                if correct_signals and mastery >= 0.5:
-                    m["status"] = "resolved"
-                elif st == "open":
-                    m["status"] = "improving"
-            elif st == "open" and mastery >= 0.55:
+        sev = str(m.get("severity") or "medium").lower()
+        if st == "open":
+            if sev in ("medium", "low") and (mastery >= 0.40 or turn_ok or verdict in ("correct", "true", "ok")):
                 m["status"] = "improving"
+                m["resolved_hint"] = m.get("resolved_hint") or "auto: solid turn→improving"
+                changed += 1
+            elif sev == "high" and mastery >= 0.50:
+                m["status"] = "improving"
+                m["resolved_hint"] = m.get("resolved_hint") or "auto: mastery≥0.5 high→improving"
+                changed += 1
+        if m.get("status") == "improving" and mastery >= 0.60 and verdict in ("correct", "true", "ok"):
+            m["status"] = "resolved"
+            m["resolved_hint"] = m.get("resolved_hint") or "auto: mastery≥0.6 + correct→resolved"
+            changed += 1
+    return changed
 
 
 def apply_assessment(
@@ -1931,6 +2397,11 @@ def apply_assessment(
         active = state.get("active_session") or {}
         active["last_verdict"] = verdict if verdict != "ok" else "correct"
         active["pending_verdict_feedback"] = False
+        if verdict in ("correct", "true", "ok"):
+            cur = get_open_thread(active)
+            if cur:
+                cur["status"] = "closed"
+                cur["closed_reason"] = "verdict_correct"
 
     raw_subject = assessment.get("subject", "general")
     raw_concept = assessment.get("concept")
@@ -2143,7 +2614,9 @@ def apply_assessment(
 
     concept["next_review"] = calculate_review_date(concept, assessment)
 
-    _auto_resolve_misconceptions(concept, assessment)
+    _auto_resolve_misconceptions(concept, assessment, verdict=verdict)
+    # Periodic hygiene (dedupe + age) after every scored turn
+    hygiene_misconceptions(state)
 
     # --------------------------------------------------------
     # Prerequisites (optional LLM proposals)
@@ -2384,15 +2857,22 @@ def extract_partial_routing_action(buffer):
     return None
 
 
-def ask_model(messages, stream=None):
+def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
     """
     Call Ollama native /api/chat.
     Field name is "think" (not "thinking"). THINK=False disables CoT.
     When STREAM is True, live-prints the learner-facing response field
     as tokens arrive (JSON is still collected in full for parsing).
+
+    on_response_delta(text_so_far, delta): optional callback for web SSE.
+    live_print: override console printing (default = STREAM and no callback).
     """
     think_val = _normalize_think(THINK)
     use_stream = STREAM if stream is None else bool(stream)
+    if on_response_delta is not None:
+        use_stream = True
+    if live_print is None:
+        live_print = bool(STREAM) and on_response_delta is None
 
     payload = {
         "model": MODEL_NAME,
@@ -2517,16 +2997,24 @@ def ask_model(messages, stream=None):
             partial = extract_partial_response_field(buf)
             if partial is not None:
                 if not header_shown:
-                    print()
-                    divider()
-                    print(c("TUTOR", BOLD + GREEN))
-                    divider()
-                    print()
+                    if live_print:
+                        print()
+                        divider()
+                        print(c("TUTOR", BOLD + GREEN))
+                        divider()
+                        print()
                     header_shown = True
                     ask_model.did_stream_response = True
                 if len(partial) > printed_len:
-                    print(partial[printed_len:], end="", flush=True)
+                    delta = partial[printed_len:]
                     printed_len = len(partial)
+                    if live_print:
+                        print(delta, end="", flush=True)
+                    if on_response_delta is not None:
+                        try:
+                            on_response_delta(partial, delta)
+                        except Exception:
+                            pass
         elif action in ("list_subjects", "switch", "new_subject"):
             # Explicitly do not stream the response body
             pass
@@ -2534,7 +3022,7 @@ def ask_model(messages, stream=None):
         if data.get("done"):
             break
 
-    if header_shown:
+    if header_shown and live_print:
         print()  # end streamed body
 
     content = "".join(full_content)
@@ -2615,11 +3103,88 @@ def questions_similar(a, b, threshold=0.55):
     return (len(ta & tb) / min(len(ta), len(tb))) >= threshold
 
 
+
+def _ensure_open_threads(active):
+    threads = active.get("open_threads")
+    if not isinstance(threads, list):
+        threads = []
+        active["open_threads"] = threads
+    return threads
+
+
+def get_open_thread(active):
+    """Most recent non-closed thread, or None."""
+    for t in reversed(_ensure_open_threads(active)):
+        if isinstance(t, dict) and t.get("status") in ("open", "scaffolded", "hinted"):
+            return t
+    return None
+
+
+def close_open_threads_matching(active, question_text, reason="answered"):
+    """Mark threads similar to question_text as closed."""
+    if not question_text:
+        return 0
+    n = 0
+    for t in _ensure_open_threads(active):
+        if t.get("status") == "closed":
+            continue
+        if questions_similar(t.get("q") or "", question_text, threshold=0.45):
+            t["status"] = "closed"
+            t["closed_reason"] = reason
+            n += 1
+    return n
+
+
+def push_or_bump_open_thread(active, question_text, activity=None):
+    """Register tutor question as open thread; bump tries if same thread."""
+    if not question_text:
+        return
+    threads = _ensure_open_threads(active)
+    q = str(question_text).strip()[:280]
+    # Same as current open → bump tries
+    cur = get_open_thread(active)
+    if cur and questions_similar(cur.get("q") or "", q, threshold=0.5):
+        cur["tries"] = int(cur.get("tries") or 0) + 1
+        if activity:
+            cur["activity"] = activity
+        return cur
+    # Close older opens if we clearly moved to a new distinct question
+    # (keep max 2 open — force focus)
+    opens = [t for t in threads if t.get("status") in ("open", "scaffolded", "hinted")]
+    if len(opens) >= 2:
+        # close the oldest open
+        opens[0]["status"] = "closed"
+        opens[0]["closed_reason"] = "superseded"
+    # Unique ids even after capping list (len alone collides → all "t9")
+    max_n = 0
+    for t in threads:
+        tid = str(t.get("id") or "")
+        if tid.startswith("t") and tid[1:].isdigit():
+            max_n = max(max_n, int(tid[1:]))
+    entry = {
+        "id": f"t{max_n + 1}",
+        "q": q,
+        "status": "open",
+        "tries": 1,
+        "activity": activity or active.get("current_activity"),
+    }
+    threads.append(entry)
+    active["open_threads"] = threads[-8:]  # cap history
+    return entry
+
+
+def mark_thread_scaffolded(active):
+    cur = get_open_thread(active)
+    if cur:
+        cur["status"] = "scaffolded"
+        cur["tries"] = int(cur.get("tries") or 0) + 1
+    return cur
+
+
 def update_session_memory(state, session_info, response_text):
     """
-    Update working memory: session_thread, last_tutor_question, recent_questions.
-    If the new question is too similar to a recent one, set must_advance so the
-    next policy turn forces a different activity (hard anti-repeat).
+    Update working memory: session_thread, last_tutor_question, recent_questions,
+    open_threads (pedagogical questions that must be closed, not abandoned).
     """
     active = state["active_session"]
     if not isinstance(session_info, dict):
@@ -2633,7 +3198,6 @@ def update_session_memory(state, session_info, response_text):
 
     if last_q:
         recent = list(active.get("recent_questions") or [])
-        # Hard anti-repeat: detect near-duplicate questions
         is_repeat = any(questions_similar(last_q, prev) for prev in recent[-5:])
         if is_repeat:
             active["must_advance"] = True
@@ -2646,11 +3210,25 @@ def update_session_memory(state, session_info, response_text):
             recent.append(last_q)
         active["recent_questions"] = recent[-5:]
 
+        # Register as open pedagogical thread (or bump tries on same)
+        push_or_bump_open_thread(
+            active, last_q, activity=active.get("current_activity")
+        )
+
+    # LLM may signal thread closure
+    closed = session_info.get("closed_thread") or session_info.get("close_thread")
+    if closed:
+        close_open_threads_matching(active, str(closed), reason="llm_closed")
+    if session_info.get("thread_resolved") is True:
+        cur = get_open_thread(active)
+        if cur:
+            cur["status"] = "closed"
+            cur["closed_reason"] = "llm_resolved"
+
     thread = session_info.get("session_thread")
     if thread and str(thread).strip():
         active["session_thread"] = str(thread).strip()[:500]
 
-    # Track consecutive same activity for loop-breaking
     act = active.get("current_activity")
     prev = active.get("prev_activity")
     if act and act == prev:
@@ -2920,6 +3498,16 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         return s if len(s) <= n else s[: n - 1] + "…"
 
     recent_q = (active.get("recent_questions") or [])[-3:]
+    ot = get_open_thread(active)
+    open_list = []
+    for t in (_ensure_open_threads(active))[-3:]:
+        if t.get("status") == "closed":
+            continue
+        open_list.append({
+            "q": _clip(t.get("q"), 140),
+            "status": t.get("status"),
+            "tries": int(t.get("tries") or 0),
+        })
     working = {
         "subject_id": subject_id,
         "concept_id": active.get("current_concept_id") or policy.get("concept_id"),
@@ -2928,6 +3516,7 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         "session_thread": _clip(active.get("session_thread"), 280),
         "last_tutor_question": _clip(active.get("last_tutor_question"), 200),
         "recent_questions": [_clip(q, 160) for q in recent_q],
+        "open_threads": open_list,
         "just_resumed": bool(active.get("just_resumed")),
         "pending_goal": bool(active.get("pending_goal")),
         "must_advance": bool(active.get("must_advance")),
@@ -2939,6 +3528,10 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         "preferred_concept_id": policy.get("concept_id"),
         "reason": policy.get("reason"),
         "force": bool(policy.get("force")),
+        "scaffold": bool(policy.get("scaffold")),
+        "full_teach": bool(policy.get("full_teach")),
+        "open_thread_q": _clip(policy.get("open_thread_q") or ((ot or {}).get("q")), 160),
+        "close_thread": bool(policy.get("close_thread")),
     }
 
     focus_cid = working.get("concept_id")
@@ -3002,8 +3595,24 @@ A deterministic policy chose the preferred next activity from learner state.
 - If orchestrator.force is true: you MUST use preferred_activity this turn.
 - If preferred_activity is set and force is false: prefer it unless the
   learner's latest message clearly requires a different move.
+- If orchestrator.full_teach is true: STOP quizzing. Write 4–8 clear sentences
+  that ANSWER the open point, preferably using the learner's own words/analogies
+  (veer, hoogteverschil, …). End with one easy yes/no or fill-in check. Set
+  session.thread_resolved=true. Do not re-ask the hard question.
+- If orchestrator.scaffold is true: first QUOTE what the learner got right,
+  then add the single missing piece (2–4 sentences), then ONE simpler question.
+- If orchestrator.open_thread_q is set: stay on that point; never ignore a
+  partial answer that already points the right way.
+- If orchestrator.close_thread is true: fully close the gap this turn.
+- When the learner asks what YOUR previous QUESTION means ("ik snap je vraag niet",
+  "wat bedoel je met die vraag"): start with "Ik bedoel met die vraag: …"
+  Only then. NEVER open a normal teaching turn with "Ik bedoel:".
+  NEVER say "Je bedoelt:" when clarifying your own question.
+  If they ask to slow down or unpack symbols/formulas, do NOT say "Ik bedoel".
+  Just teach: name each symbol, one short sentence each, then one easy check.
 - Set assessment.activity to the activity you actually used.
 - Stay on preferred_concept_id when set.
+- Never ask a pure TRANSFER/analogy question two turns in a row.
 """
 
     catalog_hint = """
@@ -3072,11 +3681,59 @@ IMMEDIATE FEEDBACK (critical):
 - Do not leave the learner unsure whether their last claim was right or wrong.
 - Correct facts close in time to the error; then rebuild the right reasoning.
 
+WHEN THE LEARNER IS STUCK (says "geen idee", "onduidelijk", "wat bedoel je"):
+- Do NOT repeat the same abstract question or demand another analogy.
+- First give a SHORT concrete scaffold (2–4 sentences of fact), then ONE
+  simpler yes/no or fill-in question on that fact.
+- If they ask what you meant by a question, answer that meta-question plainly
+  in one sentence, then continue teaching — never refuse to clarify.
+
+BUILD ON THE LEARNER (critical — reduce frustration):
+- Always start from what THEY just said. Quote or paraphrase their words.
+- If they are 70% right, say what is right FIRST, then the one missing piece.
+- Do NOT ignore a good analogy (veer, hoogte, …) and later reuse it as if new.
+- Never re-ask the identical conceptual question after a partial answer; either
+  complete the answer with them or fully teach it.
+- Clarifying YOUR own question only: "Ik bedoel met die vraag: …".
+  Never open a formula/symbol explanation with "Ik bedoel".
+  Never "Je bedoelt:" when they are confused about what you asked.
+
+OPEN THREADS:
+- Finish open points; do not loop the same quiz more than ~2 tries.
+- After repeated stuck or "leg uit": FULL answer (4–8 sentences), then easy check.
+- Set session.thread_resolved=true when the gap is closed.
+
+NEVER:
+- Keep the learner "in the dark" while fishing for a textbook phrase.
+- Repeat the same question after "geen idee" without adding substance.
+- Treat a near-correct answer as failure.
+
 BREADTH BEFORE DEPTH:
 - Consolidate the current concept (retrieve + explain in own words + one
   application) before introducing a new named concept or jumping far ahead.
 - If the learner still has open confusion on A, deepen A1/A2 — do not skip to B/C.
 - Respect explicit learner goals (e.g. "no unit conversion") — drop that thread.
+
+FACTUAL ACCURACY & ANALOGIES (critical — many learners trust the tutor):
+- Prefer a short correct mechanism over a catchy analogy.
+- NEVER invent an analogy that misrepresents the physics (e.g. "heavy stone
+  waves die sooner" for pion range — that is FALSE and must not be used).
+- If you use an analogy, in the SAME turn state its limit in one clause
+  ("this only illustrates X, not Y").
+- When unsure of a detail, stay qualitative and conservative; do not bluff.
+
+ONE NEW TERM PER TURN:
+- Introduce at most ONE new technical name per response (any domain: jargon,
+  symbol, named law, named component). Define it in plain language first.
+- Do NOT dump a chain of new terms in one turn (A → B → C → D).
+- If the learner says "go slow", "nieuwe concepten", "wtf", "te snel",
+  "too fast", "ralentis": stop introducing names; define only the single
+  term they asked about; one short check after.
+
+NEW CONCEPT GATE:
+- When the learner says a topic is new ("geen idee", "nieuw concept"),
+  teach the role/why first (1–2 sentences), then mechanism in the next turn —
+  not both at once with jargon.
 """
 
     output_schema = """
@@ -3125,7 +3782,9 @@ Exact structure (routing FIRST):
     "continue": true,
     "resume_instruction": "Learner-facing reconstruction question.",
     "session_thread": "Established: ... Open: ...",
-    "last_question": "The exact question you just asked the learner."
+    "last_question": "The exact question you just asked the learner.",
+    "thread_resolved": false,
+    "closed_thread": null
   }
 }
 
@@ -3155,14 +3814,22 @@ Do not mention this JSON protocol to the learner.
     for q in (working.get("recent_questions") or [])[-3:]:
         if q and q != lq:
             avoid_lines.append(f"- {q}")
+    for q in (active.get("banned_questions") or [])[-6:]:
+        if q and all(q not in line for line in avoid_lines):
+            avoid_lines.append(f"- BANNED: {q}")
     avoid_block = ""
     if avoid_lines:
         extra = ""
-        if working.get("must_advance") or int(active.get("repeat_streak") or 0) >= 1:
+        if (
+            working.get("must_advance")
+            or int(active.get("repeat_streak") or 0) >= 1
+            or (active.get("banned_questions") or [])
+        ):
             extra = (
-                "CRITICAL: You repeated a recent question. This turn you MUST "
-                "ask a DIFFERENT question on a NEW angle (application/transfer). "
-                "Do NOT ask about Z, A, or proton/neutron count if already established.\n"
+                "CRITICAL: Learner already answered or rejected a recent question. "
+                "This turn you MUST ask a DIFFERENT question on a NEW angle "
+                "(new scenario, new concept link, or deeper mechanism). "
+                "NEVER rephrase any BANNED or recent question.\n"
             )
         avoid_block = (
             "\n============================================================\n"
@@ -3236,7 +3903,16 @@ def build_messages(base_prompt, state, conversation, policy=None):
         state,
         policy=policy,
     )
-    hist = list(conversation[-MAX_CONVERSATION_MESSAGES:] or [])
+    # Prefer messages after the last session-boundary marker so topic switches
+    # do not leak prior-subject dialogue into the model context (UI keeps full log).
+    raw = list(conversation or [])
+    boundary = "[session boundary"
+    cut = 0
+    for i, m in enumerate(raw):
+        if isinstance(m, dict) and boundary in str(m.get("content") or ""):
+            cut = i + 1
+    hist = [m for m in raw[cut:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    hist = hist[-MAX_CONVERSATION_MESSAGES:]
     try:
         from metrics_lib import (
             build_breakdown_from_parts,
@@ -3648,6 +4324,21 @@ def close_session(state, resume_instruction=None):
     active["active"] = False
     active["last_activity"] = datetime.now().isoformat()
     active["just_resumed"] = False
+    active["question_number"] = 0
+    active["hint_count"] = 0
+    active["must_advance"] = False
+    active["force_scaffold"] = False
+    active["force_full_teach"] = False
+    active["stuck_signal"] = False
+    active["repeat_streak"] = 0
+    # Keep at most one open thread as resume seed; drop closed clutter
+    threads = active.get("open_threads") or []
+    opens = [t for t in threads if isinstance(t, dict) and t.get("status") in ("open", "scaffolded")]
+    active["open_threads"] = opens[-1:] if opens else []
+    if active.get("recent_questions"):
+        active["recent_questions"] = list(active["recent_questions"])[-2:]
+    if active.get("banned_questions"):
+        active["banned_questions"] = list(active["banned_questions"])[-4:]
 
     state["history"].append({
         "date": datetime.now().isoformat(),
@@ -3796,14 +4487,98 @@ def print_state_summary(state):
 # COMMANDS
 # ============================================================
 
+
+
+
+def format_concept_tree(state):
+    """Return concept tree as string (for web/CLI without printing)."""
+    import io
+    import re
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_concept_tree(state)
+    raw = buf.getvalue()
+    # Strip ANSI color codes for web / plain clients
+    return re.sub(r"\[[0-9;]*m", "", raw).strip()
+
+def print_concept_tree(state):
+    """Show subject → concept parent/child tree + open MC counts."""
+    print()
+    print(c("─" * 60, GRAY))
+    print(c("CONCEPT TREE", BOLD + CYAN))
+    print(c("─" * 60, GRAY))
+    subjects = state.get("subjects") or {}
+    if not subjects:
+        print("  (geen onderwerpen)")
+        print()
+        return
+    for sid, sub in subjects.items():
+        title = (sub or {}).get("title") or sid
+        print(f"  {c(str(title), BOLD)}  ({sid})")
+        concepts = (sub or {}).get("concepts") or {}
+        children = {}
+        for cid, cobj in concepts.items():
+            p = (cobj or {}).get("parent_concept_id")
+            if p:
+                children.setdefault(p, []).append(cid)
+        roots = [
+            cid for cid, cobj in concepts.items()
+            if not (cobj or {}).get("parent_concept_id")
+            or (cobj or {}).get("parent_concept_id") not in concepts
+        ]
+
+        def _line(cid, indent=2):
+            cobj = concepts.get(cid) or {}
+            try:
+                dims = [
+                    float(cobj.get(d) or 0)
+                    for d in ("knowledge", "retrieval", "application", "explanation", "transfer")
+                ]
+                avg = sum(dims) / 5.0
+            except Exception:
+                avg = 0.0
+            open_mc = sum(
+                1
+                for m in (cobj or {}).get("misconceptions") or []
+                if isinstance(m, dict) and m.get("status") == "open"
+            )
+            mc = f", {open_mc} open MC" if open_mc else ""
+            label = cobj.get("title") or cid
+            print(" " * indent + f"├─ {label}  avg={avg:.2f}{mc}")
+            for ch in children.get(cid) or []:
+                _line(ch, indent + 3)
+
+        seen = set()
+        for r in roots:
+            if r in seen:
+                continue
+            _line(r)
+            # mark subtree
+            stack = [r]
+            while stack:
+                n = stack.pop()
+                if n in seen:
+                    continue
+                seen.add(n)
+                stack.extend(children.get(n) or [])
+        for cid in concepts:
+            if cid not in seen:
+                _line(cid)
+    print(c("─" * 60, GRAY))
+    print()
+
+
 def print_help():
 
     print()
     print(c("COMMANDS", BOLD + CYAN))
     print()
     print("  /state              Show learner summary")
-    print("  /state full         Show complete JSON state")
+    print("  /state full         Write full JSON to learner_state_full.json + summary")
+    print("  /state dump [path]  Same (optional filename)")
     print("  /subjects           List all subjects")
+    print("  /tree               Show concept parent/child tree")
     print("  /new <subject>      Start a new subject/session")
     print("  /switch <subject>   Save current session and switch")
     print("  /resume             Resume saved session")
@@ -4123,24 +4898,34 @@ def main():
 
             continue
 
-        if user_input.lower() == "/state full":
-
-            divider()
-
-            print(
-                json.dumps(
-                    state,
-                    indent=2,
-                    ensure_ascii=False
+        if user_input.lower() == "/state full" or user_input.lower().startswith("/state dump"):
+            # Write full JSON to file (CLI paste is too large); print short summary only
+            dump_path = Path("learner_state_full.json")
+            parts = user_input.split(None, 2)
+            if len(parts) >= 3 and parts[1].lower() in ("full", "dump"):
+                # /state dump myfile.json
+                dump_path = Path(parts[2].strip() or "learner_state_full.json")
+            elif len(parts) == 2 and parts[1].lower() == "dump":
+                dump_path = Path("learner_state_full.json")
+            try:
+                dump_path.write_text(
+                    json.dumps(state, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
                 )
-            )
-
-            divider()
-
+                print(c(f"Full state written to: {dump_path.resolve()}", GREEN))
+                print("Use:  cat learner_state_full.json | less")
+                print("Or copy the file for analysis. Summary below:")
+            except Exception as e:
+                print(c(f"Could not write dump: {e}", RED))
+            print_state_summary(state)
             continue
 
         if user_input.lower() == "/subjects":
             print_subjects(state)
+            continue
+
+        if user_input.lower() in ("/tree", "/concepts"):
+            print_concept_tree(state)
             continue
 
         if user_input.lower() == "/review":
@@ -4389,8 +5174,13 @@ def main():
             print_subjects(state)
             continue
 
+        if cmd_lower in ("/tree", "/concepts"):
+            print_concept_tree(state)
+            continue
+
         if user_input.startswith("/") and not cmd_lower.startswith(
             ("/new ", "/switch ", "/state", "/subjects", "/subject",
+             "/tree", "/concepts",
              "/review", "/reset", "/quit", "/help", "/resume")
         ):
             print()
@@ -4442,7 +5232,6 @@ def main():
                 p in low
                 for p in (
                     "niet belangrijk",
-                    "geen idee",
                     "wil geen",
                     "wil niet",
                     "ik wil begrijpen",
@@ -4456,6 +5245,95 @@ def main():
                 state["active_session"]["just_resumed"] = False
                 state["active_session"]["resume_instruction"] = None
                 state["active_session"]["must_advance"] = True
+
+            # Stuck signals: "geen idee", question unclear, meta "what did you mean"
+            stuck = any(
+                p in low
+                for p in (
+                    "geen idee",
+                    "weet ik niet",
+                    "dat weet ik niet",
+                    "geen flauw",
+                    "snap je vraag niet",
+                    "snap de vraag niet",
+                    "vraag is onduidelijk",
+                    "onduidelijk",
+                    "wat bedoel je",
+                    "wat beodel",
+                    "welk fenomeen",
+                    "welke vergelijking",
+                    "geef eens een hint",
+                    "geef een hint",
+                    "hint",
+                    "leg uit",
+                    "leg het me uit",
+                    "leg me uit",
+                    "vertel het",
+                    "zeg het gewoon",
+                    "wat wil je",
+                    "wat is de formule",
+                    "wat is de formula",
+                    "wat is die formule",
+                    "formule voor",
+                    "foirumel",
+                    "geef de formule",
+                    "schrijf de formule",
+                )
+            )
+            explicit_teach = any(
+                p in low
+                for p in (
+                    "leg uit",
+                    "leg het me uit",
+                    "leg me uit",
+                    "vertel het",
+                    "zeg het gewoon",
+                    "gewoon uitleggen",
+                    "wat is de formule",
+                    "wat is de formula",
+                    "wat is die formule",
+                    "formule voor",
+                    "foirumel",
+                    "geef de formule",
+                    "schrijf de formule",
+                    "wat betekent",
+                    "definieer",
+                    "niet zo snel",
+                    "te snel",
+                    "langzamer",
+                    "meer diepgang",
+                    "toelichten",
+                    "vanwaar komen",
+                    "wat is die k",
+                    "wat is kappa",
+                    "wat zijn die formules",
+                    "wat zijn die symbolen",
+                    "abstract",
+                    "kan me er niks bij",
+                    "go slow",
+                    "slow down",
+                    "nieuwe concepten",
+                    "new concepts",
+                    "wtf",
+                    "was dat allemaal",
+                    "te veel",
+                    "too much",
+                    "too fast",
+                    "too many terms",
+                    "te veel termen",
+                )
+            )
+            if stuck:
+                hc = int(state["active_session"].get("hint_count") or 0) + 1
+                state["active_session"]["hint_count"] = hc
+                state["active_session"]["stuck_signal"] = True
+                state["active_session"]["force_scaffold"] = True
+                if explicit_teach or hc >= 2:
+                    # Hard teach: full answer this turn, then close thread
+                    state["active_session"]["force_full_teach"] = True
+                    state["active_session"]["must_advance"] = True
+            else:
+                state["active_session"]["stuck_signal"] = False
             save_state(state)
 
         # ----------------------------------------------------
@@ -4616,6 +5494,54 @@ def main():
                     )
 
         # Working memory: thread + anti-repeat question log
+        # Detect similar question → ban it and force advance next turn.
+        # If not yet streamed, one silent retry; if already streamed, ban only
+        # (avoids double TUTOR block on screen).
+        try:
+            new_q = None
+            if isinstance(session_info, dict):
+                new_q = (
+                    session_info.get("last_question")
+                    or session_info.get("last_tutor_question")
+                    or session_info.get("resume_instruction")
+                )
+            if not new_q:
+                new_q = extract_question_from_text(answer)
+            active_chk = state.setdefault("active_session", {})
+            ban_list = list(active_chk.get("banned_questions") or [])
+            recent_list = list(active_chk.get("recent_questions") or [])
+            conflict = False
+            for prev in ban_list + recent_list[-3:]:
+                if questions_similar(new_q, prev, threshold=0.50):
+                    conflict = True
+                    break
+            if conflict:
+                if new_q and new_q not in ban_list:
+                    ban_list.append(new_q)
+                active_chk["banned_questions"] = ban_list[-8:]
+                active_chk["must_advance"] = True
+                active_chk["repeat_streak"] = int(active_chk.get("repeat_streak") or 0) + 1
+                already_streamed = bool(getattr(ask_model, "did_stream_response", False))
+                if already_streamed:
+                    print(c("  [anti-repeat] similar Q banned for next turns", YELLOW))
+                elif not active_chk.get("_anti_repeat_retried"):
+                    active_chk["_anti_repeat_retried"] = True
+                    print(c("  [anti-repeat] similar question — silent retry", YELLOW))
+                    policy2 = suggest_next_activity(state)
+                    messages2 = build_messages(
+                        base_prompt, state, conversation, policy=policy2
+                    )
+                    raw2, parsed2 = ask_model_with_json_retry(messages2)
+                    if isinstance(parsed2, dict) and parsed2.get("response"):
+                        answer = str(parsed2.get("response") or answer)
+                        if parsed2.get("session"):
+                            session_info = parsed2["session"]
+                        if parsed2.get("assessment"):
+                            assessment = parsed2["assessment"]
+                active_chk["_anti_repeat_retried"] = False
+        except Exception as _ar_err:
+            print(c(f"  [anti-repeat] skip: {_ar_err}", YELLOW))
+
         update_session_memory(state, session_info if isinstance(session_info, dict) else {}, answer)
 
         # After first successful turn, resume mode is done

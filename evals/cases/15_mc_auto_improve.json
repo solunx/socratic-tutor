@@ -1,0 +1,30 @@
+{
+  "id": "15_mc_auto_improve",
+  "description": "Domain-agnostic: solid correct turn with mastery demotes open medium MC to improving.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "algebra",
+    "subject_title": "Algebra",
+    "concept_id": "slope",
+    "concept_title": "Slope",
+    "scores": {
+      "knowledge": 0.55,
+      "retrieval": 0.5,
+      "application": 0.45,
+      "explanation": 0.5,
+      "transfer": 0.3
+    },
+    "misconceptions": [
+      {
+        "description": "slope is always positive",
+        "severity": "medium",
+        "status": "open"
+      }
+    ]
+  },
+  "asserts": [
+    {
+      "type": "mc_auto_improve"
+    }
+  ]
+}

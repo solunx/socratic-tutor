@@ -123,6 +123,7 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             "response": (
                 "Commands:\n"
                 "  /subjects     lijst onderwerpen\n"
+                "  /tree         concept parent/child boom\n"
                 "  /state        korte samenvatting\n"
                 "  /state full   iets meer detail (geen ruwe JSON in chat)\n"
                 "  /review       due reviews\n"
@@ -142,6 +143,28 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             "agent": "tutor",
             "kind": "subjects",
             "response": "",
+            "subjects": subjects_payload(state),
+        }
+
+    if low in ("/tree", "/concepttree", "/concepts"):
+        try:
+            tree_text = T.format_concept_tree(state)
+        except Exception:
+            # Fallback: call print-style builder if present
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                if hasattr(T, "print_concept_tree"):
+                    T.print_concept_tree(state)
+                else:
+                    buf.write("(tree unavailable)")
+            tree_text = buf.getvalue()
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "tree",
+            "response": tree_text or "(geen concepten)",
             "subjects": subjects_payload(state),
         }
 
@@ -239,7 +262,11 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
         }
 
     if low == "/reset":
-        conversation.clear()
+        # Keep UI history; model still only sees last N messages.
+        conversation.append({
+            "role": "system",
+            "content": "[session boundary — topic switch or reset]",
+        })
         return {
             "ok": True,
             "agent": "tutor",
@@ -261,7 +288,11 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             T.close_session(state, active.get("resume_instruction"))
         subject_id = T.ensure_subject(state, title, title)
         T.start_session(state, subject_id, pending_goal=True)
-        conversation.clear()
+        # Keep UI history; model still only sees last N messages.
+        conversation.append({
+            "role": "system",
+            "content": "[session boundary — topic switch or reset]",
+        })
         T.save_state(state)
         return {
             "ok": True,
@@ -280,7 +311,11 @@ def _quiet_switch(state: dict, conversation: list, subject_id: str) -> dict:
     if active.get("active") and active.get("subject_id") != subject_id:
         T.close_session(state, active.get("resume_instruction"))
     T.start_session(state, subject_id, is_resume=True)
-    conversation.clear()
+    # Keep UI history; model still only sees last N messages.
+    conversation.append({
+        "role": "system",
+        "content": "[session boundary — topic switch or reset]",
+    })
     banner = resume_payload(state, subject_id)
     # Store resume question for anti-repeat
     resume_q = banner.get("resume_question")
@@ -541,7 +576,11 @@ def handle_turn(
         subject_id = T.ensure_subject(state, title, title, parent_id=parent_id)
         T.apply_taxonomy_proposals(state, routing, focus_subject_id=subject_id)
         T.start_session(state, subject_id, pending_goal=True)
-        conversation.clear()
+        # Keep UI history; model still only sees last N messages.
+        conversation.append({
+            "role": "system",
+            "content": "[session boundary — topic switch or reset]",
+        })
         if save:
             T.save_state(state)
         return {

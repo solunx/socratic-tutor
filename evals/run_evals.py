@@ -26,6 +26,7 @@ CASES_DIR = EVALS_DIR / "cases"
 
 sys.path.insert(0, str(ROOT))
 
+import tutor as tutor_mod  # noqa: E402
 from tutor import (  # noqa: E402
     ask_model_with_json_retry,
     build_messages,
@@ -43,6 +44,9 @@ from tutor import (  # noqa: E402
     apply_taxonomy_proposals,
     apply_prerequisite_proposals,
 )
+
+# Evals must not live-stream into the terminal or look like a real chat turn
+tutor_mod.STREAM = False
 
 
 # ------------------------------------------------------------
@@ -84,13 +88,17 @@ def build_state_from_setup(setup: dict, mode: str) -> dict:
             "last_activity": datetime.now().isoformat(),
             "question_number": 1,
             "current_concept_id": setup.get("concept_id"),
-            "current_activity": None,
+            "current_activity": setup.get("current_activity"),
+            "prev_activity": setup.get("prev_activity"),
             "resume_instruction": setup.get("resume_instruction"),
             "pending_goal": False,
             "just_resumed": bool(setup.get("just_resumed")),
             "session_thread": setup.get("session_thread"),
             "last_tutor_question": setup.get("last_tutor_question"),
             "recent_questions": list(setup.get("recent_questions") or []),
+            "last_verdict": setup.get("last_verdict"),
+            "same_activity_streak": int(setup.get("same_activity_streak") or 0),
+            "repeat_streak": int(setup.get("repeat_streak") or 0),
         })
     elif setup.get("active") is False:
         state["active_session"]["active"] = False
@@ -123,6 +131,16 @@ def run_assert(assertion: dict, result: dict | None, raw: str, policy: dict | No
         resp = str((result or {}).get("response") or "").strip()
         ok = len(resp) > 0
         return ok, f"response len={len(resp)}"
+
+    if t == "response_empty_if_action":
+        action = str(((result or {}).get("routing") or {}).get("action") or "").lower()
+        want = str(assertion.get("action") or "").lower()
+        resp = str((result or {}).get("response") or "").strip()
+        if action == want:
+            ok = len(resp) == 0
+            return ok, f"action={action!r} response len={len(resp)} (expect empty)"
+        ok = len(resp) > 0
+        return ok, f"action={action!r} (not {want}); response len={len(resp)}"
 
     if t == "routing_action_in":
         action = str(((result or {}).get("routing") or {}).get("action") or "").lower()
@@ -261,6 +279,50 @@ def run_assert(assertion: dict, result: dict | None, raw: str, policy: dict | No
             f"notes={notes} parent={child.get('parent_id')} "
             f"rel={child.get('related')} aliases={child.get('aliases')}"
         )
+
+    if t == "mc_auto_improve":
+        from tutor import apply_assessment, average_mastery
+        st = (policy or {}).get("_state")
+        # Build from default if needed
+        if st is None:
+            st = default_state()
+            ensure_subject(st, "algebra", title="Algebra")
+            ensure_concept(st, "algebra", "slope")
+            c = st["subjects"]["algebra"]["concepts"]["slope"]
+            for d, v in {
+                "knowledge": 0.55, "retrieval": 0.5, "application": 0.45,
+                "explanation": 0.5, "transfer": 0.3
+            }.items():
+                c[d] = v
+            c["misconceptions"] = [{
+                "description": "slope is always positive",
+                "severity": "medium",
+                "status": "open",
+            }]
+        else:
+            c = None
+            for sub in (st.get("subjects") or {}).values():
+                for concept in (sub.get("concepts") or {}).values():
+                    if concept.get("misconceptions"):
+                        c = concept
+                        break
+        assessment = {
+            "verdict": "correct",
+            "subject": "algebra",
+            "concept": "slope",
+            "dimensions": {
+                "knowledge": 0.6, "retrieval": 0.55, "application": 0.5,
+                "explanation": 0.55, "transfer": 0.35
+            },
+            "evidence": "Learner correctly explained slope can be negative.",
+            "misconceptions": [],
+        }
+        apply_assessment(st, assessment)
+        c = st["subjects"]["algebra"]["concepts"]["slope"]
+        mcs = c.get("misconceptions") or []
+        statuses = [m.get("status") for m in mcs if isinstance(m, dict)]
+        ok = any(s in ("improving", "resolved") for s in statuses)
+        return ok, f"mc statuses={statuses} mastery={average_mastery(c):.2f}"
 
     if t == "prereq_redirect":
         st = default_state()

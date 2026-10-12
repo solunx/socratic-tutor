@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#0f1419" />
-  <title>Tutor</title>
+  <title>Socratic Tutor</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -17,126 +17,80 @@
       --tutor: #3ecf8e;
       --you: #7aa2ff;
       --warn: #f0c14d;
-      --danger: #f07178;
       --radius: 14px;
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0; height: 100%;
-      background: var(--bg); color: var(--text);
-      font-family: var(--font);
-    }
-    body {
-      display: flex; flex-direction: column;
-      max-width: 720px; margin: 0 auto;
-      min-height: 100dvh;
-    }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+    body { display: flex; flex-direction: column; max-width: 900px; margin: 0 auto; min-height: 100dvh; }
     header {
       display: flex; align-items: center; gap: 10px;
-      padding: 12px 14px;
-      background: var(--panel);
-      border-bottom: 1px solid #2a3548;
-      position: sticky; top: 0; z-index: 10;
+      padding: 12px 14px; background: var(--panel);
+      border-bottom: 1px solid #2a3548; position: sticky; top: 0; z-index: 10;
     }
-    header h1 {
-      font-size: 1.05rem; margin: 0; font-weight: 600;
-      flex: 1;
-    }
-    .badge {
-      font-size: 0.7rem; color: var(--muted);
-      background: var(--panel2); padding: 4px 8px; border-radius: 999px;
-    }
+    header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; flex: 1; }
+    .badge { font-size: 0.7rem; color: var(--muted); background: var(--panel2); padding: 4px 8px; border-radius: 999px; }
     .icon-btn {
       background: var(--panel2); border: none; color: var(--text);
-      width: 36px; height: 36px; border-radius: 10px; cursor: pointer;
-      font-size: 1rem;
+      width: 36px; height: 36px; border-radius: 10px; cursor: pointer; font-size: 1rem;
     }
-    .icon-btn:active { opacity: 0.8; }
+    .layout { display: flex; flex: 1; min-height: 0; }
     #sidebar {
-      display: none;
-      background: var(--panel);
-      border-bottom: 1px solid #2a3548;
-      padding: 12px 14px;
-      max-height: 40vh; overflow: auto;
+      display: none; width: 260px; flex-shrink: 0;
+      background: var(--panel); border-right: 1px solid #2a3548;
+      padding: 12px; overflow-y: auto;
     }
     #sidebar.open { display: block; }
+    @media (max-width: 700px) {
+      #sidebar {
+        position: absolute; z-index: 20; top: 52px; left: 0; right: 0;
+        width: 100%; max-height: 45vh; border-right: none; border-bottom: 1px solid #2a3548;
+      }
+    }
     #sidebar h2 {
-      margin: 0 0 8px; font-size: 0.8rem;
-      text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+      margin: 0 0 8px; font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--muted);
     }
     .subject {
       padding: 10px 12px; margin: 0 0 8px;
       background: var(--panel2); border-radius: 10px; cursor: pointer;
+      border: 1px solid transparent;
     }
-    .subject:active { outline: 1px solid var(--accent); }
-    .subject .title { font-weight: 600; }
-    .subject .meta { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+    .subject.active { border-color: var(--accent); }
+    .subject .title { font-weight: 600; font-size: 0.95rem; }
+    .subject .meta { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
     #log {
-      flex: 1; overflow-y: auto;
-      padding: 14px 14px 8px;
+      flex: 1; overflow-y: auto; padding: 14px;
       display: flex; flex-direction: column; gap: 10px;
     }
     .bubble {
-      max-width: 92%;
-      padding: 10px 14px;
-      border-radius: var(--radius);
-      line-height: 1.45;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 0.95rem;
+      max-width: 92%; padding: 10px 14px; border-radius: var(--radius);
+      line-height: 1.45; white-space: pre-wrap; word-break: break-word;
     }
-    .bubble.you {
-      align-self: flex-end;
-      background: #1e3a5f;
-      border-bottom-right-radius: 4px;
-    }
-    .bubble.tutor {
-      align-self: flex-start;
-      background: #1a3d32;
-      border-bottom-left-radius: 4px;
-    }
-    .bubble.system {
-      align-self: center;
-      background: transparent;
-      color: var(--muted);
-      font-size: 0.8rem;
-      max-width: 100%;
-      text-align: center;
-    }
-    .bubble .label {
-      font-size: 0.7rem; font-weight: 600;
-      margin-bottom: 4px; opacity: 0.7;
-      text-transform: uppercase; letter-spacing: 0.03em;
-    }
-    .bubble.you .label { color: var(--you); }
-    .bubble.tutor .label { color: var(--tutor); }
-    footer {
-      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-      background: var(--panel);
-      border-top: 1px solid #2a3548;
-      display: flex; gap: 8px; align-items: flex-end;
+    .bubble.you { align-self: flex-end; background: #1e3a5f; border: 1px solid #2d4a6f; }
+    .bubble.tutor { align-self: flex-start; background: #1a3328; border: 1px solid #2a4a3a; }
+    .bubble.system { align-self: center; background: transparent; color: var(--muted); font-size: 0.85rem; max-width: 100%; text-align: center; }
+    .bubble .who { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+    .bubble .meta { font-size: 0.7rem; color: var(--muted); margin-top: 6px; }
+    .bubble.streaming::after { content: "|"; animation: blink 1s step-end infinite; margin-left: 1px; }
+    @keyframes blink { 50% { opacity: 0; } }
+    #composer {
+      display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+      background: var(--panel); border-top: 1px solid #2a3548;
     }
     #input {
-      flex: 1; resize: none;
-      min-height: 44px; max-height: 140px;
-      padding: 10px 12px;
-      border-radius: 12px; border: 1px solid #2a3548;
-      background: var(--bg); color: var(--text);
-      font: inherit; line-height: 1.35;
+      flex: 1; resize: none; min-height: 44px; max-height: 140px;
+      background: var(--panel2); color: var(--text); border: 1px solid #2a3548;
+      border-radius: 12px; padding: 10px 12px; font: inherit;
     }
-    #input:focus { outline: 1px solid var(--accent); }
+    #input.busy { opacity: 0.7; }
     #send {
-      background: var(--accent); color: #fff; border: none;
-      height: 44px; min-width: 44px; padding: 0 14px;
-      border-radius: 12px; font-weight: 600; cursor: pointer;
+      background: var(--accent); color: #fff; border: none; border-radius: 12px;
+      padding: 0 16px; font-weight: 600; cursor: pointer;
     }
-    #send:disabled { opacity: 0.5; cursor: default; }
-    .busy { opacity: 0.6; }
-    .stats {
-      font-size: 0.7rem; color: var(--muted);
-      margin-top: 6px;
-    }
+    #send:disabled { opacity: 0.5; }
+    #status { font-size: 0.75rem; color: var(--muted); padding: 0 14px 6px; }
   </style>
 </head>
 <body>
@@ -146,175 +100,152 @@
     <span class="badge" id="modelBadge">…</span>
     <button class="icon-btn" id="btnState" title="State">ⓘ</button>
   </header>
-
-  <aside id="sidebar">
-    <h2>Onderwerpen</h2>
-    <div id="subjectList"></div>
-  </aside>
-
-  <main id="log"></main>
-
-  <footer>
-    <textarea id="input" rows="1" placeholder="Typ of plak hier… (Enter = sturen, Shift+Enter = regel)"></textarea>
-    <button id="send">↑</button>
-  </footer>
-
+  <div class="layout">
+    <aside id="sidebar">
+      <h2>Onderwerpen</h2>
+      <div id="subjectList"></div>
+      <p style="font-size:0.75rem;color:var(--muted);margin-top:12px">
+        Tik een onderwerp om die chat te tonen. Geschiedenis blijft per onderwerp bewaard.
+      </p>
+    </aside>
+    <div class="main">
+      <div id="status">Laden…</div>
+      <div id="log"></div>
+      <div id="composer">
+        <textarea id="input" rows="1" placeholder="Typ of plak hier… (Enter = stuur)"></textarea>
+        <button id="send">Stuur</button>
+      </div>
+    </div>
+  </div>
   <script>
-    // Shared on server for all devices (iPhone + laptop)
-    const sessionId = "george";
-
     const log = document.getElementById("log");
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
     const sidebar = document.getElementById("sidebar");
     const subjectList = document.getElementById("subjectList");
+    const statusEl = document.getElementById("status");
     const modelBadge = document.getElementById("modelBadge");
 
-    function addBubble(role, text, extra) {
+    let inFlight = false;
+    let activeThread = "_lobby";
+    let subjects = [];
+
+    function addBubble(role, text, meta) {
       const div = document.createElement("div");
       div.className = "bubble " + role;
       if (role === "you" || role === "tutor") {
-        const label = document.createElement("div");
-        label.className = "label";
-        label.textContent = role === "you" ? "Jij" : "Tutor";
-        div.appendChild(label);
+        const who = document.createElement("div");
+        who.className = "who";
+        who.textContent = role === "you" ? "Jij" : "Tutor";
+        div.appendChild(who);
       }
       const body = document.createElement("div");
+      body.className = "body";
       body.textContent = text || "";
       div.appendChild(body);
-      if (extra) {
-        const s = document.createElement("div");
-        s.className = "stats";
-        s.textContent = extra;
-        div.appendChild(s);
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        div.appendChild(m);
       }
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
+      return div;
     }
 
-    function renderSubjects(subjects) {
+    function clearLog() {
+      log.innerHTML = "";
+    }
+
+    function renderHistory(hist) {
+      clearLog();
+      (hist || []).forEach((h) => addBubble(h.role, h.text));
+    }
+
+    function renderSubjects(list) {
+      subjects = list || [];
       subjectList.innerHTML = "";
-      if (!subjects || !subjects.length) {
-        subjectList.innerHTML = "<div class='meta' style='color:var(--muted)'>Nog geen onderwerpen.</div>";
+      if (!subjects.length) {
+        subjectList.innerHTML = "<p style='color:var(--muted);font-size:0.85rem'>Nog geen onderwerpen.</p>";
         return;
       }
-      for (const s of subjects) {
+      subjects.forEach((s) => {
         const el = document.createElement("div");
-        el.className = "subject";
+        el.className = "subject" + (s.id === activeThread ? " active" : "");
         el.innerHTML =
-          `<div class="title">${escapeHtml(s.title || s.id)}</div>` +
-          `<div class="meta">${escapeHtml(s.status || "")}` +
-          (s.open_mc ? ` · ${s.open_mc} open MC` : "") +
-          `</div>`;
-        el.onclick = () => {
-          sidebar.classList.remove("open");
-          input.value = "ik wil verder met " + (s.title || s.id);
-          send();
-        };
+          '<div class="title"></div><div class="meta"></div>';
+        el.querySelector(".title").textContent = s.title || s.id;
+        const bits = [];
+        if (s.status) bits.push(s.status);
+        if (s.concepts != null) bits.push(s.concepts + " concepten");
+        if (s.open_mc) bits.push(s.open_mc + " open MC");
+        el.querySelector(".meta").textContent = bits.join(" · ") || s.id;
+        el.onclick = () => selectSubject(s);
         subjectList.appendChild(el);
-      }
+      });
     }
 
-    function escapeHtml(t) {
-      return String(t)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    async function selectSubject(s) {
+      activeThread = s.id;
+      renderSubjects(subjects);
+      statusEl.textContent = "Laden: " + (s.title || s.id);
+      try {
+        const r = await fetch("/api/thread/" + encodeURIComponent(s.id));
+        const data = await r.json();
+        activeThread = data.thread_id || s.id;
+        renderHistory(data.history || []);
+        statusEl.textContent = (s.title || s.id) + " · " + ((data.history || []).length) + " berichten";
+        // Resume learning on this subject if needed
+        if (!(data.history || []).length) {
+          input.value = "ik wil verder met " + (s.title || s.id);
+        }
+      } catch (e) {
+        addBubble("system", "Kon thread niet laden: " + e.message);
+      }
+      if (window.innerWidth < 700) sidebar.classList.remove("open");
     }
 
     function formatStats(stats) {
       if (!stats) return "";
-      const parts = [];
-      if (stats.eval_count != null) parts.push("out=" + stats.eval_count);
-      if (stats.prompt_eval_count != null) parts.push("in=" + stats.prompt_eval_count);
-      if (stats.total_s != null) parts.push(stats.total_s + "s");
-      return parts.join(" · ");
+      const bits = [];
+      if (stats.eval_count != null) bits.push("out=" + stats.eval_count);
+      if (stats.prompt_eval_count != null) bits.push("in=" + stats.prompt_eval_count);
+      if (stats.total_s != null) bits.push(stats.total_s + "s");
+      if (stats.ttft_s != null) bits.push("ttft=" + stats.ttft_s);
+      return bits.join(" · ");
     }
 
     async function bootstrap() {
       try {
-        const r = await fetch("/api/bootstrap?session_id=" + encodeURIComponent(sessionId));
+        const r = await fetch("/api/bootstrap");
         const data = await r.json();
         modelBadge.textContent = data.model || "tutor";
-        renderSubjects(data.subjects || []);
-        const hist = data.history || [];
-        if (hist.length) {
-          addBubble("system", "Vorige chat hersteld (" + hist.length + " berichten).");
-          for (const m of hist) {
-            addBubble(m.role === "you" ? "you" : "tutor", m.text);
-          }
-        } else {
-          const n = (data.subjects || []).length;
-          addBubble(
-            "system",
-            n
-              ? `Klaar · ${n} onderwerp(en). Tik ☰ of typ wat je wilt leren.`
-              : "Klaar · start met een onderwerp, bv. “ik wil agents leren”."
-          );
-        }
+        if (data.subjects) renderSubjects(data.subjects);
+        activeThread = data.thread_id || "_lobby";
+        renderHistory(data.history || []);
+        const n = (data.subjects || []).length;
+        statusEl.textContent = "Klaar · " + n + " onderwerp(en). Tik ☰ of typ wat je wilt leren.";
       } catch (e) {
-        addBubble("system", "Kan de server niet bereiken. Draait de gateway op Tailscale?");
+        statusEl.textContent = "Gateway offline? " + e.message;
       }
     }
 
-    let inFlight = false;
-    let lastSentText = "";
-    let lastSentAt = 0;
+    function handleResult(data, opts) {
+      opts = opts || {};
+      if (data.subjects) renderSubjects(data.subjects);
+      if (data.thread_id) activeThread = data.thread_id;
 
-    async function send() {
-      const text = input.value.trim();
-      if (!text) return;
-      // Ignore double-tap / resend while a request is still running
-      if (inFlight) return;
-      // Ignore identical resend within 8s (typical "retry after network glitch")
-      const now = Date.now();
-      if (text === lastSentText && now - lastSentAt < 8000) {
-        addBubble("system", "Zelfde bericht is net verstuurd — even wachten op antwoord.");
+      if (data.kind === "tree") {
+        addBubble("tutor", data.response || "");
         return;
       }
-      inFlight = true;
-      lastSentText = text;
-      lastSentAt = now;
-      input.value = "";
-      autoSize();
-      addBubble("you", text);
-      sendBtn.disabled = true;
-      input.classList.add("busy");
-
-      try {
-        const r = await fetch("/api/v1/turn", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: text,
-            agent: "tutor",
-            session_id: sessionId,
-            channel: "web",
-          }),
-        });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const data = await r.json();
-        handleResult(data);
-      } catch (e) {
-        addBubble("system", "Netwerkfout: " + e.message + " — stuur niet opnieuw tenzij de tutor echt niet antwoordt.");
-      } finally {
-        inFlight = false;
-        sendBtn.disabled = false;
-        input.classList.remove("busy");
-        input.focus();
-      }
-    }
-
-    function handleResult(data) {
-      if (data.subjects) renderSubjects(data.subjects);
-
       if (data.kind === "subjects") {
         const names = (data.subjects || []).map((s) => s.title).join(", ") || "geen";
         addBubble("system", "Onderwerpen: " + names);
-        if (data.response) addBubble("tutor", data.response, formatStats(data.stats));
+        if (data.response) addBubble("tutor", data.response);
         return;
       }
-
       if (data.kind === "resume") {
         const r = data.resume || {};
         let head = "Hervat: " + (r.title || "");
@@ -323,26 +254,133 @@
           head += "\nRecent: " + r.recent_concepts.map((c) => c.title).join(", ");
         }
         addBubble("system", head);
-        if (data.response || r.resume_question) {
+        if (!opts.streamedBody && (data.response || r.resume_question)) {
           addBubble("tutor", data.response || r.resume_question, "ophalen");
         }
         return;
       }
-
-      if ((data.kind === "state" || data.kind === "state_full") && data.response) {
+      if ((data.kind === "state" || data.kind === "state_full" || data.kind === "help" ||
+           data.kind === "quit" || data.kind === "reset" || data.kind === "debug") && data.response) {
         addBubble("system", data.response);
         return;
       }
-
-      if (data.kind === "quit" || data.kind === "help" || data.kind === "reset" || data.kind === "debug") {
-        addBubble("system", data.response || "");
-        return;
-      }
-
-      if (data.response) {
+      if (!opts.streamedBody && data.response) {
         addBubble("tutor", data.response, formatStats(data.stats));
-      } else if (!data.ok) {
-        addBubble("system", data.response || "Fout");
+      } else if (opts.streamedBody && data.stats) {
+        // attach stats to last tutor bubble
+        const bubbles = log.querySelectorAll(".bubble.tutor");
+        const last = bubbles[bubbles.length - 1];
+        if (last && !last.querySelector(".meta")) {
+          const m = document.createElement("div");
+          m.className = "meta";
+          m.textContent = formatStats(data.stats);
+          last.appendChild(m);
+        }
+      }
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text || inFlight) return;
+      inFlight = true;
+      sendBtn.disabled = true;
+      input.classList.add("busy");
+      addBubble("you", text);
+      input.value = "";
+      autoSize();
+
+      const isCmd = text.startsWith("/");
+      let tutorBubble = null;
+      let streamed = false;
+      let bodyEl = null;
+
+      try {
+        let r = await fetch("/api/v1/turn/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+          body: JSON.stringify({
+            message: text,
+            agent: "tutor",
+            thread_id: activeThread === "_lobby" ? null : activeThread,
+          }),
+        });
+        if (!r.ok) {
+          // Fallback non-stream (shows server detail if any)
+          let detail = "";
+          try {
+            const errBody = await r.json();
+            detail = errBody.detail ? (" " + JSON.stringify(errBody.detail)) : "";
+          } catch (_) {}
+          const r2 = await fetch("/api/v1/turn", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: text,
+              agent: "tutor",
+              thread_id: activeThread === "_lobby" ? null : activeThread,
+            }),
+          });
+          if (!r2.ok) {
+            let d2 = detail;
+            try {
+              const eb = await r2.json();
+              d2 = eb.detail ? (" " + JSON.stringify(eb.detail)) : d2;
+            } catch (_) {}
+            throw new Error("HTTP " + r2.status + d2);
+          }
+          const data = await r2.json();
+          handleResult(data, { streamedBody: false });
+          statusEl.textContent = data.thread_id ? ("Thread: " + data.thread_id) : "Klaar";
+          return;
+        }
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalData = null;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data: "));
+            if (!line) continue;
+            let ev;
+            try { ev = JSON.parse(line.slice(6)); } catch (_) { continue; }
+            if (ev.type === "token") {
+              if (!tutorBubble) {
+                tutorBubble = addBubble("tutor", "");
+                tutorBubble.classList.add("streaming");
+                bodyEl = tutorBubble.querySelector(".body");
+                streamed = true;
+              }
+              bodyEl.textContent += (ev.text || "");
+              log.scrollTop = log.scrollHeight;
+            } else if (ev.type === "done") {
+              finalData = ev;
+              if (tutorBubble) tutorBubble.classList.remove("streaming");
+            }
+          }
+        }
+
+        if (finalData) {
+          handleResult(finalData, { streamedBody: streamed && !isCmd });
+          if (streamed && finalData.response && bodyEl && !bodyEl.textContent.trim()) {
+            bodyEl.textContent = finalData.response;
+          }
+          statusEl.textContent = finalData.thread_id
+            ? ("Thread: " + finalData.thread_id)
+            : "Klaar";
+        }
+      } catch (e) {
+        addBubble("system", "Netwerkfout: " + e.message);
+      } finally {
+        inFlight = false;
+        sendBtn.disabled = false;
+        input.classList.remove("busy");
+        input.focus();
       }
     }
 
@@ -359,10 +397,8 @@
         send();
       }
     });
-    document.getElementById("btnSubjects").onclick = () => {
-      sidebar.classList.toggle("open");
-    };
-    document.getElementById("btnState").onclick = async () => {
+    document.getElementById("btnSubjects").onclick = () => sidebar.classList.toggle("open");
+    document.getElementById("btnState").onclick = () => {
       input.value = "/state";
       send();
     };
