@@ -283,6 +283,7 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 | 2026-10 | FSRS-inspired scheduling (Phase D) shipped |
 | 2026-10 | Taxonomy + pending MC auto-promote (Phase E foundation) |
 | 2026-10 | Next: LLM propose_parent / richer tree, or streaming |
+| 2026-10 | Observability: metrics_lib + per-component token breakdown; measure before optimising |
 
 ---
 

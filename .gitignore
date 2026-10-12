@@ -41,3 +41,13 @@ evals/.cache/
 
 # Ollama / model caches if ever linked here
 models/
+
+# LLM observability logs
+metrics/
+system_prompt.md.bak-*
+system_prompt_old.md
+metrics/
+.venv/
+__pycache__/
+learner_state.json
+web_conversation.json

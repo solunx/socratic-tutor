@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent
 SYSTEM_PROMPT_FILE = BASE_DIR / "system_prompt.md"
 STATE_FILE = BASE_DIR / "learner_state.json"
 CATALOG_FILE = BASE_DIR / "misconception_catalog.json"
+METRICS_DIR = BASE_DIR / "metrics"
 
 # Native Ollama chat API — honors think:false more reliably than /v1 for Qwen3.8
 OLLAMA_HOST = "http://localhost:11434"
@@ -43,6 +44,12 @@ MAX_CONVERSATION_MESSAGES = 12  # keep prompt lean for speed
 
 # Session target. The tutor may continue longer if useful.
 DEFAULT_SESSION_MINUTES = 30
+
+# --- State hygiene (disk growth without losing mastery signal) ---
+MAX_HISTORY_ENTRIES = 40          # session breadcrumbs only
+MAX_EVIDENCE_PER_CONCEPT = 8      # recent evidence windows
+MAX_MISCONCEPTIONS_PER_CONCEPT = 8
+MAX_OUTPUT_TOKENS = 700           # phase-3: room for full JSON (response+routing+assessment+session)
 
 
 # ============================================================
@@ -174,7 +181,49 @@ def atomic_save_json(path, data):
     tmp.replace(path)
 
 
+def prune_learner_state(state):
+    """Keep mastery signal; drop bulk that does not help teaching.
+
+    - history: last MAX_HISTORY_ENTRIES only
+    - evidence: last MAX_EVIDENCE_PER_CONCEPT per concept
+    - misconceptions: prefer open/improving; drop oldest resolved beyond cap
+    Does NOT delete subjects, concepts, dimension scores, or FSRS fields.
+    """
+    if not isinstance(state, dict):
+        return state
+    hist = state.get("history")
+    if isinstance(hist, list) and len(hist) > MAX_HISTORY_ENTRIES:
+        state["history"] = hist[-MAX_HISTORY_ENTRIES:]
+
+    for sub in (state.get("subjects") or {}).values():
+        if not isinstance(sub, dict):
+            continue
+        for concept in (sub.get("concepts") or {}).values():
+            if not isinstance(concept, dict):
+                continue
+            ev = concept.get("evidence")
+            if isinstance(ev, list) and len(ev) > MAX_EVIDENCE_PER_CONCEPT:
+                concept["evidence"] = ev[-MAX_EVIDENCE_PER_CONCEPT:]
+            mcs = concept.get("misconceptions")
+            if not isinstance(mcs, list) or len(mcs) <= MAX_MISCONCEPTIONS_PER_CONCEPT:
+                continue
+            # Keep all non-resolved; fill with newest resolved if room
+            openish = [m for m in mcs if isinstance(m, dict) and m.get("status", "open") != "resolved"]
+            resolved = [m for m in mcs if isinstance(m, dict) and m.get("status") == "resolved"]
+            strings = [m for m in mcs if not isinstance(m, dict)]
+            kept = openish + strings
+            room = MAX_MISCONCEPTIONS_PER_CONCEPT - len(kept)
+            if room > 0:
+                kept.extend(resolved[-room:])
+            else:
+                # too many open: keep most recent openish
+                kept = kept[-MAX_MISCONCEPTIONS_PER_CONCEPT:]
+            concept["misconceptions"] = kept
+    return state
+
+
 def save_state(state):
+    prune_learner_state(state)
     atomic_save_json(STATE_FILE, state)
 
 
@@ -764,34 +813,36 @@ def average_mastery(concept):
     return sum(values) / len(values)
 
 
-def has_open_misconception(concept):
+def has_open_misconception(concept, include_improving=False):
+    """True if concept has unresolved misconceptions worth probing.
 
-    for item in concept.get(
-        "misconceptions",
-        []
-    ):
-
+    By default only status=="open" counts. status=="improving" is progress —
+    do not keep forcing MISCONCEPTION_CHECK every turn for those.
+    """
+    for item in concept.get("misconceptions") or []:
         if isinstance(item, dict):
-
-            if item.get(
-                "status",
-                "open"
-            ) != "resolved":
+            st = item.get("status", "open")
+            if st == "resolved":
+                continue
+            if st == "improving" and not include_improving:
+                continue
+            if st in ("open", "improving"):
                 return True
-
         elif isinstance(item, str):
             return True
-
     return False
 
 
-def open_misconceptions(concept, severity=None):
+def open_misconceptions(concept, severity=None, include_improving=False):
     """Return open misconception dicts; optional severity filter (high/medium/low)."""
     out = []
     for item in concept.get("misconceptions") or []:
         if not isinstance(item, dict):
             continue
-        if item.get("status", "open") == "resolved":
+        st = item.get("status", "open")
+        if st == "resolved":
+            continue
+        if st == "improving" and not include_improving:
             continue
         if severity and str(item.get("severity", "")).lower() != severity.lower():
             continue
@@ -848,6 +899,23 @@ def suggest_next_activity(state):
             "force": False,
         }
 
+    # 0) Hard anti-repeat / activity-loop break (Python-enforced)
+    if active.get("must_advance") or int(active.get("same_activity_streak") or 0) >= 3:
+        active["must_advance"] = False
+        last_act = active.get("current_activity") or active.get("prev_activity")
+        # Pick a different activity than the one that was looping
+        candidates = ["APPLICATION", "EXPLANATION", "RETRIEVAL", "TRANSFER"]
+        nxt = next((a for a in candidates if a != last_act), "APPLICATION")
+        streak = int(active.get("repeat_streak") or 0)
+        active["same_activity_streak"] = 0
+        return {
+            "activity": nxt,
+            "concept_id": cid,
+            "subject_id": sid,
+            "reason": f"must advance (repeat_streak={streak}, broke loop from {last_act})",
+            "force": True,
+        }
+
     # 1) Due reviews for this subject
     now = datetime.now().isoformat()
     for item in state.get("review_queue") or []:
@@ -863,18 +931,24 @@ def suggest_next_activity(state):
                 "force": True,
             }
 
-    # 2) High-severity open misconception on focus concept
+    # 2) High-severity open misconception — force limited (not forever)
     if concept:
         high = open_misconceptions(concept, severity="high")
         if high:
-            desc = str(high[0].get("description", ""))[:60]
-            return {
-                "activity": "MISCONCEPTION_CHECK",
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": f"open high-severity MC: {desc}",
-                "force": True,
-            }
+            qn = int(active.get("question_number") or 0)
+            mc_forces = int(active.get("mc_force_count") or 0)
+            mastery = average_mastery(concept)
+            # Skip if mastery already OK, or already forced 2x this session
+            if mastery < 0.45 and mc_forces < 2 and (qn == 0 or qn % 5 == 1):
+                desc = str(high[0].get("description", ""))[:60]
+                active["mc_force_count"] = mc_forces + 1
+                return {
+                    "activity": "MISCONCEPTION_CHECK",
+                    "concept_id": cid,
+                    "subject_id": sid,
+                    "reason": f"open high-severity MC: {desc}",
+                    "force": True,
+                }
 
     # 3) Weak hard prerequisite — teach deeper gap first
     if concept and cid:
@@ -919,17 +993,45 @@ def suggest_next_activity(state):
                 "force": False,
             }
 
-    # 5) Any open misconception
+    # 6) Open misconception — soft, rare (high severity already handled above)
+    qn = int(active.get("question_number") or 0)
     if concept and has_open_misconception(concept):
-        return {
-            "activity": "MISCONCEPTION_CHECK",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": "open misconception on focus concept",
-            "force": False,
-        }
+        n_open = len(open_misconceptions(concept))
+        # At most every 4th question — never dominate the session
+        if qn > 0 and qn % 4 == 0:
+            return {
+                "activity": "MISCONCEPTION_CHECK",
+                "concept_id": cid,
+                "subject_id": sid,
+                "reason": f"open MC soft check (n_open={n_open}, q={qn})",
+                "force": False,
+            }
 
-    # 6) Free choice
+    # 6b) Breadth-before-depth mastery gate
+    # Stay on current concept until a solid "bubble" exists (avg mastery + few open MCs).
+    # Blocks soft jumps to brand-new named concepts while foundations are thin.
+    if concept and cid:
+        m = average_mastery(concept)
+        n_open = len(open_misconceptions(concept))
+        if m < 0.45 or n_open >= 3:
+            # Prefer explanation/retrieval on SAME concept — not transfer to elsewhere
+            scores = {d: (clamp(concept.get(d)) or 0.0) for d in DIMENSIONS}
+            weakest = min(scores, key=scores.get)
+            act = DIM_TO_ACTIVITY.get(weakest, "EXPLANATION")
+            if act == "TRANSFER":
+                act = "EXPLANATION"
+            return {
+                "activity": act,
+                "concept_id": cid,
+                "subject_id": sid,
+                "reason": (
+                    f"mastery gate: stay on {cid} "
+                    f"(avg={m:.2f}, open_mc={n_open}) — consolidate before new topic"
+                ),
+                "force": False,
+            }
+
+    # 7) Free choice
     return {
         "activity": None,
         "concept_id": cid,
@@ -979,10 +1081,16 @@ def grade_from_assessment(concept, assessment):
     Map tutor assessment → FSRS grade 1..4.
     1 Again, 2 Hard, 3 Good, 4 Easy.
     """
-    if has_open_misconception(concept):
-        high = open_misconceptions(concept, severity="high")
-        if high:
-            return 1  # Again
+    dims_early = (assessment or {}).get("dimensions") or {}
+    early_scores = [
+        clamp(dims_early.get(d))
+        for d in DIMENSIONS
+        if clamp(dims_early.get(d)) is not None
+    ]
+    early_avg = sum(early_scores) / len(early_scores) if early_scores else None
+    if has_open_misconception(concept) and open_misconceptions(concept, severity="high"):
+        if early_avg is None or early_avg < 0.35:
+            return 1  # Again — still struggling
 
     dims = (assessment or {}).get("dimensions") or {}
     scores = []
@@ -1742,6 +1850,64 @@ def update_dimension(
     )
 
 
+
+def _auto_resolve_misconceptions(concept, assessment):
+    """Demote open MCs when the learner demonstrates recovery."""
+    if not concept:
+        return
+    dims = (assessment or {}).get("dimensions") or {}
+    scores = [clamp(dims.get(d)) for d in DIMENSIONS if clamp(dims.get(d)) is not None]
+    mastery = average_mastery(concept)
+    turn_ok = (sum(scores) / len(scores)) >= 0.45 if scores else False
+    solid = mastery >= 0.45 or turn_ok
+    evidence = str((assessment or {}).get("evidence") or "").lower()
+    correct_signals = any(
+        s in evidence
+        for s in (
+            "correctly", "z=2", "z=1", "2 protons", "2 protonen",
+            "a=4", "a=2", "a=3", "resolved", "klopt",
+        )
+    )
+    for m in concept.get("misconceptions") or []:
+        if not isinstance(m, dict):
+            continue
+        st = m.get("status", "open")
+        if st == "resolved":
+            continue
+        sev = str(m.get("severity", "")).lower()
+        desc = str(m.get("description", "")).lower()
+        # Explicit model status
+        for item in (assessment or {}).get("misconceptions") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") not in ("resolved", "improving"):
+                continue
+            if item.get("id") and item.get("id") == m.get("id"):
+                m["status"] = item["status"]
+                break
+            idesc = str(item.get("description") or "").lower()
+            if idesc and idesc[:30] in desc:
+                m["status"] = item["status"]
+                break
+        else:
+            if not solid:
+                continue
+            za = any(
+                k in desc
+                for k in (
+                    "massagetal", "atoomnummer", "helium-4", "he-4",
+                    "vier protonen", "four protons", "elektronen",
+                )
+            )
+            if sev == "high" and (za or correct_signals):
+                if correct_signals and mastery >= 0.5:
+                    m["status"] = "resolved"
+                elif st == "open":
+                    m["status"] = "improving"
+            elif st == "open" and mastery >= 0.55:
+                m["status"] = "improving"
+
+
 def apply_assessment(
     state,
     assessment
@@ -1752,6 +1918,19 @@ def apply_assessment(
         dict
     ):
         return None
+
+    # Immediate correctness signal (pedagogy: feedback close to the error)
+    verdict = str(assessment.get("verdict") or "").strip().lower()
+    if verdict in ("incorrect", "wrong", "false"):
+        active = state.get("active_session") or {}
+        active["last_verdict"] = "incorrect"
+        # Prefer misconception remediation next turn
+        active["must_advance"] = False
+        active["pending_verdict_feedback"] = True
+    elif verdict in ("correct", "true", "ok", "partial"):
+        active = state.get("active_session") or {}
+        active["last_verdict"] = verdict if verdict != "ok" else "correct"
+        active["pending_verdict_feedback"] = False
 
     raw_subject = assessment.get("subject", "general")
     raw_concept = assessment.get("concept")
@@ -1964,6 +2143,8 @@ def apply_assessment(
 
     concept["next_review"] = calculate_review_date(concept, assessment)
 
+    _auto_resolve_misconceptions(concept, assessment)
+
     # --------------------------------------------------------
     # Prerequisites (optional LLM proposals)
     # --------------------------------------------------------
@@ -2000,6 +2181,7 @@ def apply_assessment(
         state[
             "active_session"
         ]["current_activity"] = activity
+        pass  # mc_force_count set only on forced high-MC policy returns
 
     state[
         "active_session"
@@ -2052,10 +2234,17 @@ def extract_json_object(text):
     # First attempt: entire response
     try:
         value = json.loads(text)
-
         if isinstance(value, dict):
             return value
+    except Exception:
+        pass
 
+    # Common model slip: trailing commas before } or ]
+    try:
+        fixed = re.sub(r",\s*([}\]])", r"\1", text)
+        value = json.loads(fixed)
+        if isinstance(value, dict):
+            return value
     except Exception:
         pass
 
@@ -2210,8 +2399,11 @@ def ask_model(messages, stream=None):
         "messages": messages,
         "stream": use_stream,
         "think": think_val,
+        # Force structured JSON — cuts most parse failures / second-call retries
+        "format": "json",
         "options": {
             "temperature": TEMPERATURE,
+            "num_predict": MAX_OUTPUT_TOKENS,
         },
     }
 
@@ -2232,15 +2424,33 @@ def ask_model(messages, stream=None):
         if not content:
             content = thinking_text
         total_ns = data.get("total_duration") or 0
+        prompt_ns = data.get("prompt_eval_duration") or 0
+        eval_ns = data.get("eval_duration") or 0
+        load_ns = data.get("load_duration") or 0
+        eval_n = data.get("eval_count") or 0
+        prompt_n = data.get("prompt_eval_count") or 0
+        total_s = (total_ns / 1e9) if total_ns else None
+        eval_s = (eval_ns / 1e9) if eval_ns else None
         ask_model.last_stats = {
+            "model": MODEL_NAME,
             "think_requested": think_val,
             "thinking_returned": bool(thinking_text),
             "thinking_chars": len(thinking_text),
-            "eval_count": data.get("eval_count") or 0,
-            "prompt_eval_count": data.get("prompt_eval_count") or 0,
-            "total_s": round(total_ns / 1e9, 1) if total_ns else None,
+            "eval_count": eval_n,
+            "prompt_eval_count": prompt_n,
+            "total_s": round(total_s, 2) if total_s is not None else None,
+            "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
+            "eval_s": round(eval_s, 3) if eval_s is not None else None,
+            "load_s": round(load_ns / 1e9, 3) if load_ns else None,
+            "ttft_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
+            "out_tok_per_s": round(eval_n / eval_s, 1) if eval_s and eval_n else None,
             "streamed": False,
         }
+        try:
+            from metrics_lib import log_call_from_stats
+            log_call_from_stats(ask_model.last_stats)
+        except Exception:
+            pass
         return content
 
     # ---- streaming path ----
@@ -2257,8 +2467,12 @@ def ask_model(messages, stream=None):
     eval_count = 0
     prompt_eval_count = 0
     total_ns = 0
+    prompt_ns = 0
+    eval_ns = 0
+    load_ns = 0
     header_shown = False
     printed_len = 0
+    ttft_s = None
 
     for line in response.iter_lines(decode_unicode=True):
         if not line:
@@ -2273,6 +2487,8 @@ def ask_model(messages, stream=None):
         think_piece = message.get("thinking") or ""
         if piece:
             full_content.append(piece)
+            if ttft_s is None:
+                ttft_s = (datetime.now() - t0).total_seconds()
         if think_piece:
             thinking_parts.append(think_piece)
 
@@ -2282,6 +2498,12 @@ def ask_model(messages, stream=None):
             prompt_eval_count = data["prompt_eval_count"]
         if data.get("total_duration"):
             total_ns = data["total_duration"]
+        if data.get("prompt_eval_duration"):
+            prompt_ns = data["prompt_eval_duration"]
+        if data.get("eval_duration"):
+            eval_ns = data["eval_duration"]
+        if data.get("load_duration"):
+            load_ns = data["load_duration"]
 
         # Live-print ONLY for teaching turns (continue / clarify).
         # list_subjects / switch / new_subject are handled by Python UI —
@@ -2321,15 +2543,31 @@ def ask_model(messages, stream=None):
         content = thinking_text
 
     elapsed = (datetime.now() - t0).total_seconds()
+    total_s = (total_ns / 1e9) if total_ns else elapsed
+    eval_s = (eval_ns / 1e9) if eval_ns else None
+    # Prefer wall-clock first token; fall back to prompt_eval_duration
+    if ttft_s is None and prompt_ns:
+        ttft_s = prompt_ns / 1e9
     ask_model.last_stats = {
+        "model": MODEL_NAME,
         "think_requested": think_val,
         "thinking_returned": bool(thinking_text),
         "thinking_chars": len(thinking_text),
         "eval_count": eval_count,
         "prompt_eval_count": prompt_eval_count,
-        "total_s": round(total_ns / 1e9, 1) if total_ns else round(elapsed, 1),
+        "total_s": round(total_s, 2),
+        "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
+        "eval_s": round(eval_s, 3) if eval_s is not None else None,
+        "load_s": round(load_ns / 1e9, 3) if load_ns else None,
+        "ttft_s": round(ttft_s, 3) if ttft_s is not None else None,
+        "out_tok_per_s": round(eval_count / eval_s, 1) if eval_s and eval_count else None,
         "streamed": True,
     }
+    try:
+        from metrics_lib import log_call_from_stats
+        log_call_from_stats(ask_model.last_stats)
+    except Exception:
+        pass
     return content
 
 
@@ -2355,15 +2593,38 @@ def extract_question_from_text(text):
     return text[:200] or None
 
 
+def questions_similar(a, b, threshold=0.55):
+    """Token-overlap similarity for anti-repeat (Dutch/English).
+
+    Uses intersection / min(|a|,|b|) so a short rephrase of a longer
+    question still counts as a repeat.
+    """
+    if not a or not b:
+        return False
+    a, b = str(a).strip().lower(), str(b).strip().lower()
+    if a == b:
+        return True
+    for x in ("?", "؟", "！", "!"):
+        a = a.replace(x, " ")
+        b = b.replace(x, " ")
+    def toks(s):
+        return set(re.findall(r"[a-z0-9à-ÿ]{3,}", s))
+    ta, tb = toks(a), toks(b)
+    if not ta or not tb:
+        return False
+    return (len(ta & tb) / min(len(ta), len(tb))) >= threshold
+
+
 def update_session_memory(state, session_info, response_text):
     """
     Update working memory: session_thread, last_tutor_question, recent_questions.
+    If the new question is too similar to a recent one, set must_advance so the
+    next policy turn forces a different activity (hard anti-repeat).
     """
     active = state["active_session"]
     if not isinstance(session_info, dict):
         session_info = {}
 
-    # Explicit last_question from model, else extract from response
     last_q = session_info.get("last_question") or session_info.get("last_tutor_question")
     if last_q:
         last_q = str(last_q).strip()[:300]
@@ -2371,16 +2632,32 @@ def update_session_memory(state, session_info, response_text):
         last_q = extract_question_from_text(response_text)
 
     if last_q:
-        active["last_tutor_question"] = last_q
         recent = list(active.get("recent_questions") or [])
-        # Avoid exact dup at end
-        if not recent or recent[-1] != last_q:
+        # Hard anti-repeat: detect near-duplicate questions
+        is_repeat = any(questions_similar(last_q, prev) for prev in recent[-5:])
+        if is_repeat:
+            active["must_advance"] = True
+            active["repeat_streak"] = int(active.get("repeat_streak") or 0) + 1
+        else:
+            active["repeat_streak"] = 0
+
+        active["last_tutor_question"] = last_q
+        if not recent or not questions_similar(recent[-1], last_q):
             recent.append(last_q)
         active["recent_questions"] = recent[-5:]
 
     thread = session_info.get("session_thread")
     if thread and str(thread).strip():
         active["session_thread"] = str(thread).strip()[:500]
+
+    # Track consecutive same activity for loop-breaking
+    act = active.get("current_activity")
+    prev = active.get("prev_activity")
+    if act and act == prev:
+        active["same_activity_streak"] = int(active.get("same_activity_streak") or 0) + 1
+    else:
+        active["same_activity_streak"] = 1
+    active["prev_activity"] = act
 
 
 def print_model_stats():
@@ -2402,11 +2679,35 @@ def print_model_stats():
         f"out={eval_n}tok",
         f"in={prompt_n}tok",
     ]
+    if s.get("ttft_s") is not None:
+        parts.append(f"ttft={s['ttft_s']}s")
+    if s.get("out_tok_per_s") is not None:
+        parts.append(f"{s['out_tok_per_s']}tok/s")
     if streamed:
         parts.append("stream")
+    if getattr(ask_model, "last_json_retry", False):
+        parts.append("json_retry")
     if secs is not None:
         parts.append(f"{secs}s")
     print(c("  [" + " | ".join(parts) + "]", GRAY))
+    # Optional one-line component sizes from last build
+    try:
+        from metrics_lib import get_last_breakdown
+        bd = get_last_breakdown()
+        if bd and bd.get("components"):
+            top = sorted(
+                bd["components"],
+                key=lambda x: -(x.get("tokens_est") or 0),
+            )[:3]
+            bits = [f"{x['name']}≈{x.get('tokens_est', 0)}" for x in top]
+            est = bd.get("total_tokens_est")
+            ph = bd.get("prefix_hash") or "-"
+            print(c(
+                f"  [ctx est≈{est} | prefix={ph} | top: {', '.join(bits)}]",
+                GRAY,
+            ))
+    except Exception:
+        pass
 
 
 JSON_REMINDER = (
@@ -2421,30 +2722,48 @@ JSON_REMINDER = (
 def ask_model_with_json_retry(messages):
     """
     Call the model once. If the reply is not valid JSON,
-    do exactly one retry with a short reminder.
+    do exactly one retry with a short reminder (non-streaming).
     Returns (raw_text, parsed_dict_or_None).
+    Sets ask_model.last_json_retry when a second call was needed.
     """
+    ask_model.last_json_retry = False
     raw = ask_model(messages)
     parsed = extract_json_object(raw)
 
-    if parsed is not None:
+    if parsed is not None and isinstance(parsed, dict) and (
+        "response" in parsed or "routing" in parsed
+    ):
+        if getattr(ask_model, "last_stats", None) is not None:
+            ask_model.last_stats["json_retry"] = False
         return raw, parsed
 
-    # One retry with a strict reminder
-    retry_messages = messages + [
-        {"role": "assistant", "content": raw},
-        {"role": "user", "content": JSON_REMINDER}
+    # First call produced invalid/truncated JSON (often num_predict cut).
+    # Do NOT stream the retry — avoids a second TUTOR block on screen.
+    first_streamed = bool(getattr(ask_model, "did_stream_response", False))
+    if first_streamed:
+        print()
+        print(c("(antwoord opnieuw opbouwen…)", GRAY))
+        print()
+
+    failed_preview = (raw or "")[:400]
+    retry_messages = list(messages) + [
+        {"role": "assistant", "content": failed_preview},
+        {"role": "user", "content": JSON_REMINDER},
     ]
 
     try:
-        raw2 = ask_model(retry_messages)
+        ask_model.last_json_retry = True
+        # Force non-stream so only one final TUTOR body is shown via show_tutor
+        raw2 = ask_model(retry_messages, stream=False)
+        # Retry was silent: allow show_tutor to print the final response once
+        ask_model.did_stream_response = False
+        if getattr(ask_model, "last_stats", None) is not None:
+            ask_model.last_stats["json_retry"] = True
         parsed2 = extract_json_object(raw2)
         if parsed2 is not None:
             return raw2, parsed2
-        # Both failed — return the second attempt for display
         return raw2, None
     except Exception:
-        # Retry itself failed — fall back to first raw
         return raw, None
 
 
@@ -2488,21 +2807,27 @@ def compact_subject_state(state, subject_id, focus=True):
 
         open_mc = []
         for m in concept.get("misconceptions") or []:
-            if isinstance(m, dict) and m.get("status", "open") == "open":
-                open_mc.append({
-                    "description": str(m.get("description", ""))[:120],
-                    "severity": m.get("severity", "unknown"),
-                })
-            if len(open_mc) >= 2:
+            if not isinstance(m, dict):
+                continue
+            if m.get("status", "open") != "open":
+                continue
+            entry = {
+                "severity": m.get("severity", "medium"),
+                "description": str(m.get("description", ""))[:80],
+            }
+            if m.get("id"):
+                entry["id"] = m.get("id")
+            open_mc.append(entry)
+            if len(open_mc) >= 1:  # one open MC in prompt is enough
                 break
 
         evidence = concept.get("evidence") or []
         last_ev = []
         for e in evidence[-1:]:
             if isinstance(e, dict):
-                last_ev.append(str(e.get("evidence", ""))[:80])
+                last_ev.append(str(e.get("evidence", ""))[:60])
             else:
-                last_ev.append(str(e)[:80])
+                last_ev.append(str(e)[:60])
 
         prereq_out = []
         for edge in (concept.get("prerequisites") or [])[:5]:
@@ -2590,16 +2915,23 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         })
 
     # --- working memory slice ---
+    def _clip(s, n=180):
+        s = str(s or "")
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    recent_q = (active.get("recent_questions") or [])[-3:]
     working = {
         "subject_id": subject_id,
         "concept_id": active.get("current_concept_id") or policy.get("concept_id"),
         "activity": active.get("current_activity"),
         "question_number": active.get("question_number"),
-        "session_thread": active.get("session_thread"),
-        "last_tutor_question": active.get("last_tutor_question"),
-        "recent_questions": (active.get("recent_questions") or [])[-5:],
+        "session_thread": _clip(active.get("session_thread"), 280),
+        "last_tutor_question": _clip(active.get("last_tutor_question"), 200),
+        "recent_questions": [_clip(q, 160) for q in recent_q],
         "just_resumed": bool(active.get("just_resumed")),
         "pending_goal": bool(active.get("pending_goal")),
+        "must_advance": bool(active.get("must_advance")),
+        "repeat_streak": int(active.get("repeat_streak") or 0),
     }
 
     orchestrator = {
@@ -2610,7 +2942,7 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
     }
 
     focus_cid = working.get("concept_id")
-    mc_catalog = catalog_prompt_slice(subject_id, focus_cid) if mode == "teach" else []
+    mc_catalog = catalog_prompt_slice(subject_id, focus_cid, max_entries=4) if mode == "teach" else []
 
     if mode == "teach" and subject_id:
         state_context = {
@@ -2686,18 +3018,7 @@ When probing a known open MC, prefer the remediation_hint as guidance for
 your question — do not lecture the full correct answer.
 """
 
-    return f"""
-{base_prompt}
-
-============================================================
-CURRENT LEARNER STATE ({mode})
-============================================================
-
-{state_json}
-{resume_hint}
-{anti_repeat}
-{policy_hint}
-{catalog_hint}
+    static_rules = """
 ============================================================
 IMPORTANT TUTOR RULES
 ============================================================
@@ -2744,6 +3065,21 @@ Do not automatically explain everything.
 
 Prefer making the learner retrieve, reason and apply.
 
+IMMEDIATE FEEDBACK (critical):
+- If the learner stated something factually wrong, the FIRST sentence of
+  response MUST clearly say it is incorrect (one short clause), then ask a
+  Socratic question that repairs that specific error.
+- Do not leave the learner unsure whether their last claim was right or wrong.
+- Correct facts close in time to the error; then rebuild the right reasoning.
+
+BREADTH BEFORE DEPTH:
+- Consolidate the current concept (retrieve + explain in own words + one
+  application) before introducing a new named concept or jumping far ahead.
+- If the learner still has open confusion on A, deepen A1/A2 — do not skip to B/C.
+- Respect explicit learner goals (e.g. "no unit conversion") — drop that thread.
+"""
+
+    output_schema = """
 ============================================================
 REQUIRED OUTPUT
 ============================================================
@@ -2756,41 +3092,42 @@ No text before or after the JSON.
 
 Exact structure (routing FIRST):
 
-{{
-  "routing": {{
+{
+  "routing": {
     "action": "continue",
     "subject_id": null,
     "proposed_title": null,
-    "taxonomy": {{
+    "taxonomy": {
       "parent_id": null,
       "related_ids": [],
       "add_aliases": [],
       "concept_id": null,
       "concept_aliases": []
-    }}
-  }},
+    }
+  },
   "response": "Message shown to learner (empty for list_subjects/switch/new_subject).",
-  "assessment": {{
+  "assessment": {
     "subject": "subject_id",
     "concept": "concept_id or null",
     "activity": "RETRIEVAL",
-    "dimensions": {{
+    "verdict": "correct | partial | incorrect | null",
+    "dimensions": {
       "knowledge": null,
       "retrieval": null,
       "application": null,
       "explanation": null,
       "transfer": null
-    }},
+    },
     "misconceptions": [],
     "evidence": "Concrete evidence from latest learner answer."
-  }},
-  "session": {{
+  },
+  "session": {
     "continue": true,
     "resume_instruction": "Learner-facing reconstruction question.",
     "session_thread": "Established: ... Open: ...",
     "last_question": "The exact question you just asked the learner."
-  }}
-}}
+  }
+}
 
 routing.action: continue | switch | new_subject | list_subjects | clarify
 - switch: subject_id must be an existing id; response MUST be ""
@@ -2810,6 +3147,88 @@ One main question at a time.
 Do not mention this JSON protocol to the learner.
 """
 
+    # Concrete questions to avoid (dynamic — kept AFTER fixed prefix)
+    avoid_lines = []
+    lq = working.get("last_tutor_question")
+    if lq:
+        avoid_lines.append(f"- last: {lq}")
+    for q in (working.get("recent_questions") or [])[-3:]:
+        if q and q != lq:
+            avoid_lines.append(f"- {q}")
+    avoid_block = ""
+    if avoid_lines:
+        extra = ""
+        if working.get("must_advance") or int(active.get("repeat_streak") or 0) >= 1:
+            extra = (
+                "CRITICAL: You repeated a recent question. This turn you MUST "
+                "ask a DIFFERENT question on a NEW angle (application/transfer). "
+                "Do NOT ask about Z, A, or proton/neutron count if already established.\n"
+            )
+        avoid_block = (
+            "\n============================================================\n"
+            "DO NOT RE-ASK (verbatim or paraphrase)\n"
+            "============================================================\n"
+            + extra
+            + "\n".join(avoid_lines)
+            + "\nIf the learner already answered these, ADVANCE to a new angle.\n"
+        )
+
+    state_block = f"""============================================================
+CURRENT LEARNER STATE ({mode})
+============================================================
+
+{state_json}
+"""
+
+    # --- Prefix cache strategy ---
+    # FIXED first (byte-stable across turns when system_prompt.md unchanged):
+    #   base_prompt → static_rules → output_schema → anti_repeat → policy_hint → catalog_hint
+    # DYNAMIC last (changes every turn):
+    #   state_context → resume_hint → avoid_block
+    # Ollama can then reuse KV for the long fixed prefix when only state changes.
+    parts = {
+        "base_prompt": base_prompt or "",
+        "static_rules": static_rules,
+        "output_schema": output_schema,
+        "anti_repeat": anti_repeat or "",
+        "policy_hint": policy_hint or "",
+        "catalog_hint": catalog_hint or "",
+        "state_context": state_block,
+        "resume_hint": resume_hint or "",
+        "avoid_recent_questions": avoid_block,
+    }
+
+    fixed_prefix = "".join([
+        parts["base_prompt"],
+        "\n\n",
+        parts["static_rules"],
+        parts["output_schema"],
+        parts["anti_repeat"],
+        parts["policy_hint"],
+        parts["catalog_hint"],
+    ])
+    dynamic_suffix = "".join([
+        parts["state_context"],
+        parts["resume_hint"],
+        parts["avoid_recent_questions"],
+    ])
+    system_message = fixed_prefix + dynamic_suffix
+
+    # Stash for metrics (no full text in logs — sizes only)
+    try:
+        from metrics_lib import build_breakdown_from_parts, prompt_hash, set_last_breakdown
+        bd = build_breakdown_from_parts(parts, conversation=None)
+        bd["mode"] = mode
+        bd["prefix_hash"] = prompt_hash(fixed_prefix)
+        bd["prefix_chars"] = len(fixed_prefix)
+        bd["dynamic_chars"] = len(dynamic_suffix)
+        bd["_parts"] = parts
+        set_last_breakdown(bd)
+    except Exception:
+        pass
+
+    return system_message
+
 
 def build_messages(base_prompt, state, conversation, policy=None):
     system_message = build_system_message(
@@ -2817,9 +3236,35 @@ def build_messages(base_prompt, state, conversation, policy=None):
         state,
         policy=policy,
     )
+    hist = list(conversation[-MAX_CONVERSATION_MESSAGES:] or [])
+    try:
+        from metrics_lib import (
+            build_breakdown_from_parts,
+            estimate_tokens,
+            get_last_breakdown,
+            prompt_hash,
+            set_last_breakdown,
+        )
+        prev = get_last_breakdown() or {}
+        parts = prev.pop("_parts", None) or {"system_message": system_message}
+        if parts and "system_message" not in parts and "base_prompt" in parts:
+            bd = build_breakdown_from_parts(parts, conversation=hist)
+        else:
+            bd = build_breakdown_from_parts({"system_message": system_message}, conversation=hist)
+        bd["mode"] = prev.get("mode")
+        bd["system_hash"] = prompt_hash(system_message)
+        bd["system_chars"] = len(system_message)
+        bd["system_tokens_est"] = estimate_tokens(system_message)
+        if prev.get("prefix_hash"):
+            bd["prefix_hash"] = prev["prefix_hash"]
+            bd["prefix_chars"] = prev.get("prefix_chars")
+            bd["dynamic_chars"] = prev.get("dynamic_chars")
+        set_last_breakdown(bd)
+    except Exception:
+        pass
     return [
         {"role": "system", "content": system_message},
-        *conversation[-MAX_CONVERSATION_MESSAGES:],
+        *hist,
     ]
 
 
@@ -3652,6 +4097,24 @@ def main():
             print_help()
             continue
 
+        if user_input.lower() in ("/debug tokens", "/debug", "/metrics"):
+            try:
+                from metrics_lib import format_breakdown, get_last_breakdown, print_summary
+                policy = suggest_next_activity(state)
+                build_messages(base_prompt, state, conversation, policy=policy)
+                bd = get_last_breakdown()
+                print()
+                if bd:
+                    print(format_breakdown(bd.get("components") or [], bd.get("total_tokens_est")))
+                    print(f"system_hash={bd.get('system_hash')} mode={bd.get('mode')}")
+                else:
+                    print("No breakdown available.")
+                print()
+                print_summary(10)
+            except Exception as e:
+                print(c(f"Metrics error: {e}", YELLOW))
+            continue
+
         if user_input.lower() == "/state":
 
             print_state_summary(
@@ -3893,6 +4356,8 @@ def main():
                     already_streamed=getattr(ask_model, "did_stream_response", False),
                 )
                 conversation.append({"role": "assistant", "content": answer})
+                if state.get("active_session", {}).get("active"):
+                    state["active_session"]["just_resumed"] = False
                 save_state(state)
                 continue
 
@@ -3947,6 +4412,50 @@ def main():
         if active.get("active"):
             state["active_session"]["question_number"] += 1
             state["active_session"]["last_activity"] = datetime.now().isoformat()
+            # Learner signals "we already did this" → force advance next policy
+            low = user_input.lower()
+            already = any(
+                p in low
+                for p in (
+                    "dat hebben we",
+                    "hebben we al",
+                    "al gedaan",
+                    "al uitgerekend",
+                    "al toegelicht",
+                    "al uitgelegd",
+                    "daarnet gedaan",
+                    "net gedaan",
+                    "duizend keer",
+                    "al 10 keer",
+                    "al gezegd",
+                    "geen correctie nodig",
+                    "omg dat heb ik",
+                )
+            )
+            if already:
+                state["active_session"]["must_advance"] = True
+                state["active_session"]["repeat_streak"] = int(
+                    state["active_session"].get("repeat_streak") or 0
+                ) + 1
+            # Learner rejects a thread / shifts goal → drop stale resume + resume force
+            goal_shift = any(
+                p in low
+                for p in (
+                    "niet belangrijk",
+                    "geen idee",
+                    "wil geen",
+                    "wil niet",
+                    "ik wil begrijpen",
+                    "ik wil meer",
+                    "liever over",
+                    "overstappen",
+                    "iets anders",
+                )
+            )
+            if goal_shift:
+                state["active_session"]["just_resumed"] = False
+                state["active_session"]["resume_instruction"] = None
+                state["active_session"]["must_advance"] = True
             save_state(state)
 
         # ----------------------------------------------------
@@ -4006,6 +4515,10 @@ def main():
                 "role": "assistant",
                 "content": answer
             })
+            # Still leave resume mode so policy does not force RETRIEVAL forever
+            if state.get("active_session", {}).get("active"):
+                state["active_session"]["just_resumed"] = False
+                save_state(state)
             save_state(state)
             continue
 

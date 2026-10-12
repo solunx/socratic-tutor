@@ -334,7 +334,7 @@
         return;
       }
 
-      if (data.kind === "quit" || data.kind === "help" || data.kind === "reset") {
+      if (data.kind === "quit" || data.kind === "help" || data.kind === "reset" || data.kind === "debug") {
         addBubble("system", data.response || "");
         return;
       }

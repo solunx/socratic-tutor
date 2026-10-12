@@ -129,6 +129,7 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
                 "  /new <topic>  nieuw onderwerp\n"
                 "  /reset        alleen chatcontext leeg\n"
                 "  /quit         sessie opslaan / afsluiten\n"
+                "  /debug tokens prompt component sizes (no LLM)\n"
                 "  /help\n"
                 "Natuurlijke taal: “ik wil verder met agents”, “welke onderwerpen?”"
             ),
@@ -206,6 +207,25 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             ),
             "summary": state_summary(state),
             "subjects": subjects_payload(state),
+        }
+
+    if low in ("/debug tokens", "/debug", "/metrics"):
+        try:
+            from metrics_lib import format_breakdown, get_last_breakdown
+            base = T.load_system_prompt()
+            policy = T.suggest_next_activity(state)
+            T.build_messages(base, state, conversation, policy=policy)
+            bd = get_last_breakdown() or {}
+            text = format_breakdown(bd.get("components") or [], bd.get("total_tokens_est"))
+            text += f"\nsystem_hash={bd.get('system_hash')} mode={bd.get('mode')}"
+        except Exception as e:
+            text = f"Metrics error: {e}"
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "debug",
+            "response": text,
+            "summary": state_summary(state),
         }
 
     if low == "/review":
@@ -348,6 +368,47 @@ def handle_turn(
             state["active_session"].get("question_number") or 0
         ) + 1
         state["active_session"]["last_activity"] = datetime.now().isoformat()
+        low = text.lower()
+        if any(
+            phrase in low
+            for phrase in (
+                "dat hebben we",
+                "hebben we al",
+                "al gedaan",
+                "al uitgerekend",
+                "al toegelicht",
+                "al uitgelegd",
+                "daarnet gedaan",
+                "net gedaan",
+                "duizend keer",
+                "al 10 keer",
+                "al gezegd",
+                "geen correctie nodig",
+                "omg dat heb ik",
+            )
+        ):
+            state["active_session"]["must_advance"] = True
+            state["active_session"]["repeat_streak"] = int(
+                state["active_session"].get("repeat_streak") or 0
+            ) + 1
+
+        if any(
+            phrase in low
+            for phrase in (
+                "niet belangrijk",
+                "geen idee",
+                "wil geen",
+                "wil niet",
+                "ik wil begrijpen",
+                "ik wil meer",
+                "liever over",
+                "overstappen",
+                "iets anders",
+            )
+        ):
+            state["active_session"]["just_resumed"] = False
+            state["active_session"]["resume_instruction"] = None
+            state["active_session"]["must_advance"] = True
 
     policy = T.suggest_next_activity(state)
     # Force non-streaming for API reliability (gateway can stream later)
