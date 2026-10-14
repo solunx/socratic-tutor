@@ -1,0 +1,53 @@
+{
+  "id": "16_multi_turn_policy_chain",
+  "description": "Domain-agnostic multi-turn policy: correct EXPLANATION → APPLICATION, then high MC forces MISCONCEPTION_CHECK.",
+  "mode": "policy_only",
+  "multi_turn": true,
+  "setup": {
+    "active": true,
+    "subject_id": "demo_topic",
+    "subject_title": "Demo Topic",
+    "concept_id": "core_idea",
+    "concept_title": "Core Idea",
+    "scores": {
+      "knowledge": 0.5,
+      "retrieval": 0.5,
+      "application": 0.35,
+      "explanation": 0.5,
+      "transfer": 0.2
+    },
+    "current_activity": "EXPLANATION",
+    "last_verdict": "correct",
+    "same_activity_streak": 1
+  },
+  "turns": [
+    {
+      "label": "after_correct_explanation",
+      "policy_expect": { "activity": "APPLICATION", "force": true },
+      "asserts": [
+        { "type": "policy_activity", "value": "APPLICATION" },
+        { "type": "policy_force", "value": true }
+      ]
+    },
+    {
+      "label": "high_mc_interrupts",
+      "setup_delta": {
+        "misconceptions": [
+          {
+            "id": "M_DEMO_WRONG",
+            "description": "Learner confuses core idea with a surface analogy",
+            "severity": "high",
+            "status": "open"
+          }
+        ],
+        "last_verdict": null,
+        "current_activity": "APPLICATION"
+      },
+      "policy_expect": { "activity": "MISCONCEPTION_CHECK", "force": true },
+      "asserts": [
+        { "type": "policy_activity", "value": "MISCONCEPTION_CHECK" },
+        { "type": "policy_force", "value": true }
+      ]
+    }
+  ]
+}

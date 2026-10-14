@@ -21,7 +21,31 @@
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+    html, body { height: 100%; margin: 0; }
+    #login-overlay {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(10,14,20,0.92); align-items: center; justify-content: center;
+      flex-direction: column; padding: 24px;
+    }
+    #login-overlay.show { display: flex; }
+    #login-box {
+      background: var(--panel); border: 1px solid #2a3548; border-radius: 14px;
+      padding: 24px; width: min(360px, 100%); box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+    }
+    #login-box h1 { margin: 0 0 8px; font-size: 1.2rem; }
+    #login-box p { margin: 0 0 16px; color: var(--muted); font-size: 0.9rem; }
+    #login-box label { display: block; font-size: 0.8rem; color: var(--muted); margin: 10px 0 4px; }
+    #login-box input {
+      width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #2a3548;
+      background: var(--panel2); color: var(--text); font-size: 1rem; box-sizing: border-box;
+    }
+    #login-box button {
+      margin-top: 16px; width: 100%; padding: 12px; border: none; border-radius: 10px;
+      background: var(--accent); color: #0a0e14; font-weight: 600; cursor: pointer; font-size: 1rem;
+    }
+    #login-error { color: #f87171; font-size: 0.85rem; margin-top: 10px; min-height: 1.2em; }
+    #user-badge { font-size: 0.75rem; color: var(--muted); margin-left: 8px; }
+    body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
     body { display: flex; flex-direction: column; max-width: 900px; margin: 0 auto; min-height: 100dvh; }
     header {
       display: flex; align-items: center; gap: 10px;
@@ -91,14 +115,46 @@
     }
     #send:disabled { opacity: 0.5; }
     #status { font-size: 0.75rem; color: var(--muted); padding: 0 14px 6px; }
+    #subjectBadge {
+      font-size: 0.72rem; color: var(--tutor);
+      background: #1a3328; border: 1px solid #2a4a3a;
+      padding: 4px 10px; border-radius: 999px; max-width: 42vw;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #subjectBadge.empty { color: var(--muted); background: var(--panel2); border-color: #2a3548; }
+    .bubble.tree .body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.78rem; line-height: 1.35; white-space: pre;
+      overflow-x: auto;
+    }
+    .bubble.resume-head {
+      align-self: stretch; max-width: 100%;
+      background: var(--panel2); border: 1px dashed #3a4a60;
+      color: var(--muted); font-size: 0.85rem; text-align: left;
+    }
   </style>
 </head>
 <body>
+  <div id="login-overlay">
+    <div id="login-box">
+      <h1>Socratic Tutor</h1>
+      <p>Log in met je account. Elke gebruiker heeft een eigen leerstate.</p>
+      <label for="login-user">Gebruikersnaam</label>
+      <input id="login-user" autocomplete="username" autocapitalize="none" />
+      <label for="login-pass">Wachtwoord</label>
+      <input id="login-pass" type="password" autocomplete="current-password" />
+      <button type="button" id="login-btn">Inloggen</button>
+      <div id="login-error"></div>
+    </div>
+  </div>
+
   <header>
     <button class="icon-btn" id="btnSubjects" title="Onderwerpen">☰</button>
     <h1>Socratic Tutor</h1>
+    <span class="badge empty" id="subjectBadge" title="Actief onderwerp">—</span>
     <span class="badge" id="modelBadge">…</span>
     <button class="icon-btn" id="btnState" title="State">ⓘ</button>
+    <span id="user-badge"></span>
   </header>
   <div class="layout">
     <aside id="sidebar">
@@ -125,10 +181,48 @@
     const subjectList = document.getElementById("subjectList");
     const statusEl = document.getElementById("status");
     const modelBadge = document.getElementById("modelBadge");
+    const subjectBadge = document.getElementById("subjectBadge");
 
     let inFlight = false;
     let activeThread = "_lobby";
     let subjects = [];
+
+    function subjectTitle(id) {
+      if (!id || id === "_lobby") return "Lobby";
+      const s = subjects.find((x) => x.id === id);
+      return (s && (s.title || s.id)) || id;
+    }
+
+    function setActiveSubject(id) {
+      activeThread = id || "_lobby";
+      const title = subjectTitle(activeThread);
+      if (title) {
+        subjectBadge.textContent = title;
+        subjectBadge.classList.remove("empty");
+        subjectBadge.title = "Actief: " + title + " (" + activeThread + ")";
+      } else {
+        subjectBadge.textContent = "geen onderwerp";
+        subjectBadge.classList.add("empty");
+        subjectBadge.title = "Geen actief onderwerp";
+      }
+      renderSubjects(subjects);
+    }
+
+    function lastBubbleText(role) {
+      const nodes = log.querySelectorAll(".bubble." + role + " .body");
+      if (!nodes.length) return "";
+      return (nodes[nodes.length - 1].textContent || "").trim();
+    }
+
+    function textsRoughlyEqual(a, b) {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const na = norm(a), nb = norm(b);
+      if (!na || !nb) return false;
+      if (na === nb) return true;
+      if (na.length > 40 && nb.includes(na.slice(0, 40))) return true;
+      if (nb.length > 40 && na.includes(nb.slice(0, 40))) return true;
+      return false;
+    }
 
     function addBubble(role, text, meta) {
       const div = document.createElement("div");
@@ -166,8 +260,17 @@
     function renderSubjects(list) {
       subjects = list || [];
       subjectList.innerHTML = "";
+      // Lobby always first
+      const lobbyEl = document.createElement("div");
+      lobbyEl.className = "subject" + (activeThread === "_lobby" ? " active" : "");
+      lobbyEl.innerHTML = '<div class="title">Lobby</div><div class="meta">Overzicht · wisselen · /tree · /review</div>';
+      lobbyEl.onclick = () => selectLobby();
+      subjectList.appendChild(lobbyEl);
       if (!subjects.length) {
-        subjectList.innerHTML = "<p style='color:var(--muted);font-size:0.85rem'>Nog geen onderwerpen.</p>";
+        const p = document.createElement("p");
+        p.style.cssText = "color:var(--muted);font-size:0.85rem";
+        p.textContent = "Nog geen onderwerpen. Typ /new … of vraag het in de lobby.";
+        subjectList.appendChild(p);
         return;
       }
       subjects.forEach((s) => {
@@ -186,14 +289,31 @@
       });
     }
 
+    async function selectLobby() {
+      setActiveSubject("_lobby");
+      statusEl.textContent = "Lobby";
+      try {
+        const r = await apiFetch("/api/thread/" + encodeURIComponent("_lobby"));
+        const data = await r.json();
+        renderHistory(data.history || []);
+        if (!(data.history || []).length) {
+          addBubble("tutor", "Lobby: overzicht en navigatie. Welke onderwerpen heb je, of waarmee wil je verder?");
+        }
+        statusEl.textContent = "Lobby · meta";
+      } catch (e) {
+        addBubble("system", "Lobby laden mislukt: " + e.message);
+      }
+      if (window.innerWidth < 700) sidebar.classList.remove("open");
+    }
+
     async function selectSubject(s) {
-      activeThread = s.id;
-      renderSubjects(subjects);
+
+      setActiveSubject(s.id);
       statusEl.textContent = "Laden: " + (s.title || s.id);
       try {
-        const r = await fetch("/api/thread/" + encodeURIComponent(s.id));
+        const r = await apiFetch("/api/thread/" + encodeURIComponent(s.id));
         const data = await r.json();
-        activeThread = data.thread_id || s.id;
+        setActiveSubject(data.thread_id || s.id);
         renderHistory(data.history || []);
         statusEl.textContent = (s.title || s.id) + " · " + ((data.history || []).length) + " berichten";
         // Resume learning on this subject if needed
@@ -216,13 +336,69 @@
       return bits.join(" · ");
     }
 
+
+    function apiFetch(url, opts) {
+      opts = opts || {};
+      opts.credentials = "same-origin";
+      if (opts.headers && opts.body && !opts.headers["Content-Type"]) {
+        /* keep */
+      }
+      return fetch(url, opts);
+    }
+
+    function showLogin(msg) {
+      const ov = document.getElementById("login-overlay");
+      if (ov) ov.classList.add("show");
+      const err = document.getElementById("login-error");
+      if (err && msg) err.textContent = msg;
+    }
+    function hideLogin() {
+      const ov = document.getElementById("login-overlay");
+      if (ov) ov.classList.remove("show");
+    }
+
+    async function doLogin() {
+      const u = (document.getElementById("login-user").value || "").trim();
+      const pw = document.getElementById("login-pass").value || "";
+      const err = document.getElementById("login-error");
+      err.textContent = "";
+      try {
+        const r = await apiFetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, password: pw }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          err.textContent = data.detail || "Login mislukt";
+          return;
+        }
+        hideLogin();
+        const badge = document.getElementById("user-badge");
+        if (badge) badge.textContent = data.display_name || data.user_id || "";
+        await bootstrap();
+      } catch (e) {
+        err.textContent = e.message || String(e);
+      }
+    }
+
     async function bootstrap() {
       try {
-        const r = await fetch("/api/bootstrap");
+        const r = await apiFetch("/api/bootstrap");
         const data = await r.json();
+        if (r.status === 401 || data.auth_required) {
+          showLogin();
+          statusEl.textContent = "Inloggen…";
+          return;
+        }
+        if (data.user_id) {
+          const badge = document.getElementById("user-badge");
+          if (badge) badge.textContent = data.user_id;
+        }
+
         modelBadge.textContent = data.model || "tutor";
-        if (data.subjects) renderSubjects(data.subjects);
-        activeThread = data.thread_id || "_lobby";
+        if (data.subjects) subjects = data.subjects;
+        setActiveSubject(data.thread_id || "_lobby");
         renderHistory(data.history || []);
         const n = (data.subjects || []).length;
         statusEl.textContent = "Klaar · " + n + " onderwerp(en). Tik ☰ of typ wat je wilt leren.";
@@ -233,29 +409,65 @@
 
     function handleResult(data, opts) {
       opts = opts || {};
-      if (data.subjects) renderSubjects(data.subjects);
-      if (data.thread_id) activeThread = data.thread_id;
+      if (data.subjects) {
+        subjects = data.subjects;
+        renderSubjects(subjects);
+      }
+      const prevThread = activeThread;
+      if (data.thread_id) setActiveSubject(data.thread_id);
 
+      // NL switch / resume: show per-subject chat history (same as sidebar)
+      if (Array.isArray(data.history) && data.thread_id && data.kind !== "subjects") {
+        if (data.thread_id !== prevThread || data.kind === "resume") {
+          renderHistory(data.history);
+        }
+      }
+
+      if (data.kind === "lobby") {
+        setActiveSubject("_lobby");
+        if (data.response) addBubble("tutor", data.response);
+        if (data.subjects) renderSubjects(data.subjects);
+        return;
+      }
       if (data.kind === "tree") {
-        addBubble("tutor", data.response || "");
+        const div = addBubble("tutor", data.response || "");
+        div.classList.add("tree");
         return;
       }
       if (data.kind === "subjects") {
         const names = (data.subjects || []).map((s) => s.title).join(", ") || "geen";
         addBubble("system", "Onderwerpen: " + names);
-        if (data.response) addBubble("tutor", data.response);
+        if (data.response && !textsRoughlyEqual(data.response, names)) {
+          addBubble("tutor", data.response);
+        }
         return;
       }
       if (data.kind === "resume") {
         const r = data.resume || {};
-        let head = "Hervat: " + (r.title || "");
+        let head = "Hervat: " + (r.title || subjectTitle(data.thread_id) || "");
         if (r.goal) head += "\nLeerdoel: " + r.goal;
         if (r.recent_concepts && r.recent_concepts.length) {
           head += "\nRecent: " + r.recent_concepts.map((c) => c.title).join(", ");
         }
-        addBubble("system", head);
-        if (!opts.streamedBody && (data.response || r.resume_question)) {
-          addBubble("tutor", data.response || r.resume_question, "ophalen");
+        // One resume banner only (not duplicated if already shown)
+        if (!textsRoughlyEqual(lastBubbleText("system"), head) &&
+            !textsRoughlyEqual(lastBubbleText("system"), "Hervat: " + (r.title || ""))) {
+          const b = addBubble("system", head);
+          b.classList.add("resume-head");
+        }
+        const q = (data.response || r.resume_question || "").trim();
+        // Single question: skip if already streamed or same as last tutor line
+        if (q && !opts.streamedBody && !textsRoughlyEqual(lastBubbleText("tutor"), q)) {
+          addBubble("tutor", q, "ophalen");
+        } else if (opts.streamedBody && data.stats) {
+          const bubbles = log.querySelectorAll(".bubble.tutor");
+          const last = bubbles[bubbles.length - 1];
+          if (last && !last.querySelector(".meta")) {
+            const m = document.createElement("div");
+            m.className = "meta";
+            m.textContent = formatStats(data.stats) || "ophalen";
+            last.appendChild(m);
+          }
         }
         return;
       }
@@ -265,9 +477,10 @@
         return;
       }
       if (!opts.streamedBody && data.response) {
-        addBubble("tutor", data.response, formatStats(data.stats));
+        if (!textsRoughlyEqual(lastBubbleText("tutor"), data.response)) {
+          addBubble("tutor", data.response, formatStats(data.stats));
+        }
       } else if (opts.streamedBody && data.stats) {
-        // attach stats to last tutor bubble
         const bubbles = log.querySelectorAll(".bubble.tutor");
         const last = bubbles[bubbles.length - 1];
         if (last && !last.querySelector(".meta")) {
@@ -295,7 +508,7 @@
       let bodyEl = null;
 
       try {
-        let r = await fetch("/api/v1/turn/stream", {
+        let r = await apiFetch("/api/v1/turn/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
           body: JSON.stringify({
@@ -311,7 +524,7 @@
             const errBody = await r.json();
             detail = errBody.detail ? (" " + JSON.stringify(errBody.detail)) : "";
           } catch (_) {}
-          const r2 = await fetch("/api/v1/turn", {
+          const r2 = await apiFetch("/api/v1/turn", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -330,7 +543,7 @@
           }
           const data = await r2.json();
           handleResult(data, { streamedBody: false });
-          statusEl.textContent = data.thread_id ? ("Thread: " + data.thread_id) : "Klaar";
+          statusEl.textContent = subjectTitle(data.thread_id) || data.thread_id || "Klaar";
           return;
         }
         const reader = r.body.getReader();
@@ -370,9 +583,7 @@
           if (streamed && finalData.response && bodyEl && !bodyEl.textContent.trim()) {
             bodyEl.textContent = finalData.response;
           }
-          statusEl.textContent = finalData.thread_id
-            ? ("Thread: " + finalData.thread_id)
-            : "Klaar";
+          statusEl.textContent = subjectTitle(finalData.thread_id) || finalData.thread_id || "Klaar";
         }
       } catch (e) {
         addBubble("system", "Netwerkfout: " + e.message);
@@ -403,7 +614,15 @@
       send();
     };
 
+    const loginBtn = document.getElementById("login-btn");
+    if (loginBtn) {
+      loginBtn.onclick = doLogin;
+      document.getElementById("login-pass").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doLogin();
+      });
+    }
     bootstrap();
+
     input.focus();
   </script>
 </body>

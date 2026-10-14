@@ -106,6 +106,32 @@ def build_state_from_setup(setup: dict, mode: str) -> dict:
     return state
 
 
+
+def _apply_setup_delta(state: dict, delta: dict | None) -> None:
+    """Apply a small setup_delta onto an existing eval state (multi-turn)."""
+    if not delta:
+        return
+    sid = state.get("active_session", {}).get("subject_id")
+    cid = state.get("active_session", {}).get("current_concept_id")
+    if not sid or sid not in state.get("subjects", {}):
+        return
+    concepts = state["subjects"][sid].get("concepts") or {}
+    if not cid or cid not in concepts:
+        # pick first concept
+        cid = next(iter(concepts), None)
+    if not cid:
+        return
+    concept = concepts[cid]
+    if "misconceptions" in delta:
+        concept["misconceptions"] = list(delta["misconceptions"])
+    for k in ("last_verdict", "current_activity", "same_activity_streak", "repeat_streak"):
+        if k in delta:
+            state["active_session"][k] = delta[k]
+    for k, v in (delta.get("scores") or {}).items():
+        if k in concept:
+            concept[k] = float(v)
+
+
 # ------------------------------------------------------------
 # Assert helpers
 # ------------------------------------------------------------
@@ -354,6 +380,36 @@ def run_assert(assertion: dict, result: dict | None, raw: str, policy: dict | No
         )
         return ok, f"policy={policy}"
 
+
+    if t == "intent_repeat":
+        import intent_phrases as IP
+        ok = IP.matches_any(assertion.get("text") or "", IP.REPEAT_ADVANCE_PHRASES) == bool(assertion.get("expect", True))
+        return ok, f"repeat match={IP.matches_any(assertion.get('text') or '', IP.REPEAT_ADVANCE_PHRASES)}"
+
+    if t == "intent_skip_resume":
+        import intent_phrases as IP
+        ok = IP.matches_any(assertion.get("text") or "", IP.SKIP_RESUME_PHRASES) == bool(assertion.get("expect", True))
+        return ok, f"skip_resume={ok}"
+
+    if t == "intent_full_teach":
+        import intent_phrases as IP
+        ok = IP.matches_any(assertion.get("text") or "", IP.FULL_TEACH_PHRASES) == bool(assertion.get("expect", True))
+        return ok, f"full_teach={ok}"
+
+    if t == "intent_list_subjects":
+        import intent_phrases as IP
+        got = IP.is_list_subjects_query(assertion.get("text") or "")
+        ok = got == bool(assertion.get("expect", True))
+        return ok, f"list_subjects={got}"
+
+    if t == "intent_subject_topic":
+        import intent_phrases as IP
+        topic = IP.detect_subject_topic(assertion.get("text") or "") or ""
+        needle = (assertion.get("expect_contains") or "").lower()
+        ok = needle in topic.lower() if needle else bool(topic)
+        return ok, f"topic={topic!r}"
+
+
     return False, f"unknown assert type: {t}"
 
 
@@ -376,6 +432,50 @@ def run_case(case: dict, base_prompt: str, skip_llm: bool = False) -> dict:
     }
 
     state = build_state_from_setup(setup, mode)
+    # Multi-turn cases drive policy per turn (avoid consuming last_verdict early)
+    if case.get("multi_turn") and case.get("turns"):
+        report["policy"] = None
+        for i, turn in enumerate(case["turns"]):
+            label = turn.get("label") or f"turn_{i+1}"
+            if turn.get("setup_delta"):
+                _apply_setup_delta(state, turn["setup_delta"])
+            policy = suggest_next_activity(state)
+            report["policy"] = policy
+            pe = turn.get("policy_expect")
+            if pe:
+                if pe.get("activity") is not None and policy.get("activity") != pe.get("activity"):
+                    report["checks"].append({
+                        "type": f"{label}.policy_expect.activity",
+                        "ok": False,
+                        "detail": f"expected {pe.get('activity')!r}, got {policy.get('activity')!r}",
+                    })
+                    report["passed"] = False
+                else:
+                    report["checks"].append({
+                        "type": f"{label}.policy_expect.activity",
+                        "ok": True,
+                        "detail": f"activity={policy.get('activity')!r}",
+                    })
+                if "force" in pe:
+                    okf = bool(policy.get("force")) == bool(pe.get("force"))
+                    report["checks"].append({
+                        "type": f"{label}.policy_expect.force",
+                        "ok": okf,
+                        "detail": f"force={policy.get('force')}",
+                    })
+                    if not okf:
+                        report["passed"] = False
+            for assertion in turn.get("asserts") or []:
+                ok, detail = run_assert(assertion, None, "", policy)
+                report["checks"].append({
+                    "type": f"{label}.{assertion.get('type')}",
+                    "ok": ok,
+                    "detail": detail,
+                })
+                if not ok:
+                    report["passed"] = False
+        return report
+
     policy = suggest_next_activity(state)
     # Attach concept snapshot for FSRS asserts
     sid = setup.get("subject_id")

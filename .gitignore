@@ -44,10 +44,18 @@ models/
 
 # LLM observability logs
 metrics/
-system_prompt.md.bak-*
+
+# State locks
+*.lock
+learner_state.json.lock
+
+# Multi-user data (private)
+data/
+!data/.gitkeep
+learner_state_full*.json
+*.bak
+*.bak-*
+system_prompt.md.bak*
 system_prompt_old.md
-metrics/
-.venv/
-__pycache__/
-learner_state.json
-web_conversation.json
+data/
+!data/.gitkeep

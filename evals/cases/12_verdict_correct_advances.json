@@ -1,0 +1,38 @@
+{
+  "id": "12_verdict_correct_advances",
+  "description": "After last_verdict=correct on EXPLANATION, policy advances to APPLICATION (domain-agnostic).",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "algebra",
+    "subject_title": "Algebra",
+    "goal": "linear equations",
+    "concept_id": "slope",
+    "concept_title": "Slope",
+    "scores": {
+      "knowledge": 0.5,
+      "retrieval": 0.4,
+      "application": 0.2,
+      "explanation": 0.5,
+      "transfer": 0.1
+    },
+    "current_activity": "EXPLANATION",
+    "prev_activity": "EXPLANATION",
+    "last_verdict": "correct",
+    "same_activity_streak": 2,
+    "just_resumed": false
+  },
+  "policy_expect": {
+    "activity": "APPLICATION",
+    "force": true
+  },
+  "asserts": [
+    {
+      "type": "policy_activity",
+      "value": "APPLICATION"
+    },
+    {
+      "type": "policy_force",
+      "value": true
+    }
+  ]
+}

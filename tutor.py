@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+__version__ = "0.5.0"
 
 import json
+import fcntl
 import math
 import re
 import requests
@@ -15,7 +17,25 @@ from datetime import datetime, timedelta
 BASE_DIR = Path(__file__).resolve().parent
 
 SYSTEM_PROMPT_FILE = BASE_DIR / "system_prompt.md"
-STATE_FILE = BASE_DIR / "learner_state.json"
+STATE_FILE = BASE_DIR / "learner_state.json"  # legacy default path
+DEFAULT_USER_ID = "george"
+
+
+def resolve_state_path(user_id: str | None = None) -> Path:
+    """Per-user state file under data/users/<id>/, with legacy root fallback."""
+    uid = (user_id or DEFAULT_USER_ID).strip().lower() or DEFAULT_USER_ID
+    try:
+        import auth
+        path = auth.state_path(uid)
+        if path.exists():
+            return path
+        # Legacy single-file layout (pre multi-user)
+        if uid == DEFAULT_USER_ID and STATE_FILE.exists():
+            return STATE_FILE
+        return path
+    except Exception:
+        return STATE_FILE
+
 CATALOG_FILE = BASE_DIR / "misconception_catalog.json"
 METRICS_DIR = BASE_DIR / "metrics"
 
@@ -70,6 +90,27 @@ CONCEPT_PARENT_DEFAULTS = {
 
 
 MAX_OUTPUT_TOKENS = 700           # phase-3: room for full JSON (response+routing+assessment+session)
+
+
+# --- LLM client (see llm.py) ---
+from llm import (  # noqa: E402
+    MODEL_URL,
+    MODEL_NAME,
+    TEMPERATURE,
+    REQUEST_TIMEOUT,
+    THINK,
+    STREAM,
+    MAX_OUTPUT_TOKENS,
+    OLLAMA_HOST,
+    extract_json_object,
+    extract_partial_response_field,
+    extract_partial_routing_action,
+    ask_model,
+    ask_model_with_json_retry,
+    JSON_REMINDER,
+)
+
+from policy import suggest_next_activity  # noqa: E402
 
 
 # ============================================================
@@ -291,7 +332,17 @@ def clamp_fsrs_fields(state):
     return state
 
 
-def save_state(state):
+def _state_lock_path(path: Path | None = None):
+    p = path or STATE_FILE
+    return Path(str(p) + ".lock")
+
+
+def save_state(state, user_id: str | None = None):
+    """Persist learner state with an exclusive file lock (CLI + web safe).
+
+    user_id selects data/users/<id>/learner_state.json (multi-user web).
+    CLI can omit user_id (uses DEFAULT_USER_ID / legacy path).
+    """
     try:
         hygiene_misconceptions(state)
     except Exception:
@@ -305,7 +356,26 @@ def save_state(state):
     except Exception:
         pass
     prune_learner_state(state)
-    atomic_save_json(STATE_FILE, state)
+
+    path = resolve_state_path(user_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    lock_path = _state_lock_path(path)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(lock_path, "a+", encoding="utf-8") as lf:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            try:
+                atomic_save_json(path, state)
+            finally:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        atomic_save_json(path, state)
 
 
 def migrate_state(old):
@@ -482,50 +552,44 @@ def normalize_taxonomy_fields(state):
                 concept["parent_concept_id"] = None
 
 
-def load_state():
-    if not STATE_FILE.exists():
+def load_state(user_id: str | None = None):
+    """Load learner state for user_id (multi-user) or default/legacy path."""
+    path = resolve_state_path(user_id)
+    if not path.exists():
         state = default_state()
-        save_state(state)
+        # stamp learner id
+        try:
+            state.setdefault("learner", {})["id"] = (user_id or DEFAULT_USER_ID)
+        except Exception:
+            pass
+        save_state(state, user_id=user_id)
         return state
 
     try:
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
+        with open(path, "r", encoding="utf-8") as f:
             old = json.load(f)
-
-    except Exception as e:
-        print(
-            c(
-                f"WARNING: Could not read learner_state.json: {e}",
-                RED
-            )
-        )
-
-        backup = STATE_FILE.with_suffix(
-            ".corrupt-" +
-            datetime.now().strftime("%Y%m%d-%H%M%S") +
-            ".json"
-        )
-
+    except Exception:
+        backup = path.with_suffix(path.suffix + f".bak-{datetime.now().strftime('%Y%m%d%H%M%S')}")
         try:
-            STATE_FILE.rename(backup)
-            print(
-                f"Broken state backed up to: {backup}"
-            )
+            path.rename(backup)
         except Exception:
             pass
-
         state = default_state()
-        save_state(state)
+        save_state(state, user_id=user_id)
+        return state
+
+    if isinstance(old, dict) and int(old.get("version") or 0) >= 2:
+        state = old
+        try:
+            if user_id:
+                state.setdefault("learner", {})["id"] = user_id
+        except Exception:
+            pass
+        normalize_taxonomy_fields(state)
         return state
 
     state = migrate_state(old)
-
-    save_state(state)
-
+    save_state(state, user_id=user_id)
     return state
 
 
@@ -819,56 +883,23 @@ def detect_subject_intent(user_input):
     Detect natural-language intent to continue / switch subject.
     Returns the extracted topic string or None.
     """
-    text = user_input.strip().lower()
-
-    patterns = [
-        # "ik wil (graag) (even) over X verder (leren)"
-        r"(?:ik wil\s+)?(?:graag\s+)?(?:even\s+)?over\s+(.+?)\s+verder(?:\s+leren)?",
-        # "ik wil (graag) verder (leren) (over/met) X"
-        r"(?:ik wil\s+)?(?:graag\s+)?(?:even\s+)?(?:verder|door)(?:gaan)?(?:\s+leren)?(?:\s+(?:met|over|over het onderwerp|van))\s+(.+)",
-        # "waar was ik met/bij/over X"
-        r"(?:waar was ik (?:met|bij|over))\s+(.+)",
-        # "switch/wissel naar X"
-        r"(?:switch|wissel)(?:\s+(?:naar|over naar))?\s+(.+)",
-        # "open/hervat/resume X"
-        r"(?:open|hervat|resume)\s+(.+)",
-        # "ik wil (graag) (verder) leren over/van/met X"
-        r"(?:ik wil\s+)?(?:graag\s+)?(?:even\s+)?(?:verder\s+)?leren\s+(?:over|van|met)\s+(.+)",
-        # "laten we (verder) (gaan) met/over X"
-        r"(?:laten we\s+)?(?:graag\s+)?(?:verder\s+)?(?:gaan\s+)?(?:met|over)\s+(.+)",
-        # "ga (verder) met/over X"
-        r"(?:ga\s+)?(?:verder\s+)?(?:met|over)\s+(.+)",
-        # bare "verder met/over X"
-        r"^(?:verder\s+(?:met|over))\s+(.+)",
-        # "over X verder"
-        r"^over\s+(.+?)\s+verder",
-    ]
-
-    for pat in patterns:
-        m = re.search(pat, text)
-        if m:
-            topic = clean_topic_phrase(m.group(1))
-            if topic and len(topic) > 1:
-                return topic
-
+    import intent_phrases as IP
+    topic = IP.detect_subject_topic(user_input)
+    if not topic:
+        return None
+    topic = clean_topic_phrase(topic)
+    if topic and len(topic) > 1:
+        return topic
     return None
+
+
 
 
 def is_list_subjects_query(user_input):
     """Detect natural language questions about available subjects."""
-    text = user_input.strip().lower()
-    patterns = [
-        r"welke onderwerpen",
-        r"welke subjects",
-        r"wat voor onderwerpen",
-        r"welke topics",
-        r"toon (?:mijn )?onderwerpen",
-        r"lijst (?:van )?onderwerpen",
-        r"overzicht (?:van )?onderwerpen",
-        r"wat heb ik (?:al )?geleerd",
-        r"waar kan ik (?:aan|over) verder",
-    ]
-    return any(re.search(p, text) for p in patterns)
+    import intent_phrases as IP
+    return IP.is_list_subjects_query(user_input)
+
 
 
 # ============================================================
@@ -965,330 +996,12 @@ def get_focus_concept(state):
     return sid, None, None
 
 
-def suggest_next_activity(state):
-    """
-    Deterministic policy: choose the next learning activity from state.
-    Returns dict: activity, concept_id, subject_id, reason, force (bool).
-
-    Priority (see ROADMAP.md):
-      1. Due review for current subject
-      2. Open high-severity misconception on focus concept
-      3. Weak hard prerequisite (deeper gap first)
-      4. Just resumed → RETRIEVAL
-      5. Weakest dimension on focus concept below threshold
-      6. Any open misconception → MISCONCEPTION_CHECK
-      7. Free (LLM may choose)
-    """
-    active = state.get("active_session") or {}
-    sid, cid, concept = get_focus_concept(state)
-
-    if not active.get("active") or not sid:
-        return {
-            "activity": None,
-            "concept_id": None,
-            "subject_id": None,
-            "reason": "no active teaching session",
-            "force": False,
-        }
-
-    # 0a) Explicit "leg uit" or repeated stuck → FULL TEACH then close thread
-    if active.get("force_full_teach"):
-        active["force_full_teach"] = False
-        active["force_scaffold"] = False
-        active["stuck_signal"] = False
-        ot = get_open_thread(active)
-        focus_q = (ot or {}).get("q") if ot else None
-        if ot:
-            ot["status"] = "closed"
-            ot["closed_reason"] = "full_teach"
-        return {
-            "activity": "EXPLANATION",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": (
-                "FULL TEACH / SLOW: learner asked explanation, formula, or slow-down. "
-                "Max ONE new technical term this turn, defined in plain words first. "
-                "No misleading analogy. No chain of new jargon in one reply. "
-                "Close the open gap, then ONE easy check on a NEW angle."
-                + (f" | thread: {focus_q[:70]}" if focus_q else "")
-            ),
-            "force": True,
-            "scaffold": True,
-            "full_teach": True,
-            "close_thread": True,
-            "open_thread_q": focus_q,
-        }
-
-    # 0a2) Soft stuck → scaffold once (not endless re-ask)
-    if active.get("force_scaffold") or active.get("stuck_signal"):
-        active["force_scaffold"] = False
-        active["stuck_signal"] = False
-        mark_thread_scaffolded(active)
-        ot = get_open_thread(active)
-        focus_q = (ot or {}).get("q") if ot else None
-        tries = int((ot or {}).get("tries") or 0)
-        # If already scaffolded many times, escalate to full teach
-        if tries >= 3:
-            if ot:
-                ot["status"] = "closed"
-                ot["closed_reason"] = "full_teach_after_tries"
-            return {
-                "activity": "EXPLANATION",
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": (
-                    "FULL TEACH after failed scaffolds — answer completely "
-                    "using learner's partial ideas, close thread, easy check"
-                ),
-                "force": True,
-                "full_teach": True,
-                "close_thread": True,
-                "open_thread_q": focus_q,
-            }
-        return {
-            "activity": "EXPLANATION",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": (
-                "learner stuck — build on what THEY already said, add one missing "
-                "piece (2–4 sentences), then ONE simpler question"
-                + (f" | {focus_q[:70]}" if focus_q else "")
-            ),
-            "force": True,
-            "scaffold": True,
-            "open_thread_q": focus_q,
-        }
-
-    # 0b) Open thread: after 3 tries → FULL TEACH and CLOSE (stop the loop)
-    ot = get_open_thread(active)
-    if ot and int(ot.get("tries") or 0) >= 3 and ot.get("status") != "closed":
-        focus_q = ot.get("q")
-        ot["status"] = "closed"
-        ot["closed_reason"] = "max_tries_full_teach"
-        return {
-            "activity": "EXPLANATION",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": (
-                f"FULL TEACH — open thread tries={ot.get('tries')}: give the answer "
-                f"now (use learner's analogies), close gap, ONE easy check — "
-                f"{(focus_q or '')[:80]}"
-            ),
-            "force": True,
-            "full_teach": True,
-            "close_thread": True,
-            "open_thread_q": focus_q,
-        }
-    # tries 1–2: stay on thread but BUILD ON learner words, not pure re-ask
-    if ot and int(ot.get("tries") or 0) >= 1 and active.get("must_advance"):
-        active["must_advance"] = False
-        return {
-            "activity": "EXPLANATION",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": (
-                "open thread — quote/accept what learner got right, add ONE missing "
-                f"piece, do not re-ask the same question: {(ot.get('q') or '')[:80]}"
-            ),
-            "force": True,
-            "scaffold": True,
-            "open_thread_q": ot.get("q"),
-        }
-
-    # 0b) After a correct (or solid partial) answer: advance activity type.
-    # Domain-agnostic: do not re-quiz the same explanation angle.
-    verdict = str(active.get("last_verdict") or "").lower()
-    if verdict in ("correct", "ok") or (
-        verdict == "partial" and int(active.get("same_activity_streak") or 0) >= 1
-    ):
-        last_act = (active.get("current_activity") or active.get("prev_activity") or "").upper()
-        if last_act in ("EXPLANATION", "RETRIEVAL", "MISCONCEPTION_CHECK", ""):
-            # Prefer application, then transfer if application already strong
-            nxt = "APPLICATION"
-            if concept:
-                try:
-                    app = float(concept.get("application") or 0)
-                    tr = float(concept.get("transfer") or 0)
-                    if app >= 0.45 and tr < 0.45:
-                        nxt = "TRANSFER"
-                    elif app >= 0.45 and tr >= 0.45:
-                        nxt = "RETRIEVAL"  # spaced light check, not same explain
-                except Exception:
-                    pass
-            active["last_verdict"] = None  # consume so we don't loop this forever
-            return {
-                "activity": nxt,
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": (
-                    f"verdict was {verdict} — advance to {nxt} on a NEW angle "
-                    "(do not re-ask the same 'explain why' check)"
-                ),
-                "force": True,
-            }
-
-    # 0) Hard anti-repeat / activity-loop break (Python-enforced)
-    if active.get("must_advance") or int(active.get("same_activity_streak") or 0) >= 3:
-        active["must_advance"] = False
-        last_act = active.get("current_activity") or active.get("prev_activity")
-        candidates = ["EXPLANATION", "APPLICATION", "RETRIEVAL"]
-        nxt = next((a for a in candidates if a != last_act), "EXPLANATION")
-        streak = int(active.get("repeat_streak") or 0)
-        active["same_activity_streak"] = 0
-        return {
-            "activity": nxt,
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": f"must advance (repeat_streak={streak}, broke loop from {last_act})",
-            "force": True,
-        }
-
-    # 1) Due reviews for this subject
-    now = datetime.now().isoformat()
-    for item in state.get("review_queue") or []:
-        if item.get("subject_id") != sid:
-            continue
-        due = item.get("next_review") or item.get("due") or ""
-        if due and due <= now:
-            return {
-                "activity": "REVIEW",
-                "concept_id": item.get("concept_id") or cid,
-                "subject_id": sid,
-                "reason": f"due review for concept {item.get('concept_id') or cid}",
-                "force": True,
-            }
-
-    # 2) High-severity open misconception — force limited (not forever)
-    if concept:
-        high = open_misconceptions(concept, severity="high")
-        if high:
-            qn = int(active.get("question_number") or 0)
-            mc_forces = int(active.get("mc_force_count") or 0)
-            mastery = average_mastery(concept)
-            # Skip if mastery already OK, or already forced 2x this session
-            if mastery < 0.45 and mc_forces < 2 and (qn == 0 or qn % 5 == 1):
-                desc = str(high[0].get("description", ""))[:60]
-                active["mc_force_count"] = mc_forces + 1
-                return {
-                    "activity": "MISCONCEPTION_CHECK",
-                    "concept_id": cid,
-                    "subject_id": sid,
-                    "reason": f"open high-severity MC: {desc}",
-                    "force": True,
-                }
-
-    # 3) Weak hard prerequisite — teach deeper gap first
-    if concept and cid:
-        weak_prereq = find_weak_prerequisite(state, sid, cid)
-        if weak_prereq:
-            pre_id, pre_avg, strength = weak_prereq
-            return {
-                "activity": "RETRIEVAL",
-                "concept_id": pre_id,
-                "subject_id": sid,
-                "reason": (
-                    f"weak {strength} prerequisite {pre_id} "
-                    f"(avg={pre_avg:.2f}) before {cid}"
-                ),
-                "force": strength == "hard",
-            }
-
-    # 4) Just resumed
-    if active.get("just_resumed"):
-        return {
-            "activity": "RETRIEVAL",
-            "concept_id": cid,
-            "subject_id": sid,
-            "reason": "session just resumed — retrieval first",
-            "force": True,
-        }
-
-    # 5) Weakest dimension on focus concept
-    # IMPORTANT: do not push TRANSFER while K/R/E are still thin — that
-    # produces endless "compare to another phenomenon" loops.
-    if concept:
-        scores = {}
-        for d in DIMENSIONS:
-            v = clamp(concept.get(d))
-            scores[d] = 0.0 if v is None else v
-        weakest = min(scores, key=scores.get)
-        if scores[weakest] < WEAK_DIM_THRESHOLD:
-            act = DIM_TO_ACTIVITY.get(weakest, "RETRIEVAL")
-            foundation = min(
-                scores.get("knowledge", 0),
-                scores.get("retrieval", 0),
-                scores.get("explanation", 0),
-            )
-            if act == "TRANSFER" and foundation < 0.5:
-                # Rebuild understanding first; transfer later
-                act = "EXPLANATION" if scores.get("explanation", 0) < 0.5 else "APPLICATION"
-            # Cap consecutive TRANSFER even when foundation is OK
-            prev = (active.get("current_activity") or active.get("prev_activity") or "")
-            same = int(active.get("same_activity_streak") or 0)
-            if act == "TRANSFER" and prev == "TRANSFER" and same >= 1:
-                act = "APPLICATION"
-            return {
-                "activity": act,
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": f"weak dimension {weakest}={scores[weakest]:.2f} → {act}",
-                "force": False,
-            }
-
-    # 6) Open misconception — soft, rare (high severity already handled above)
-    qn = int(active.get("question_number") or 0)
-    if concept and has_open_misconception(concept):
-        n_open = len(open_misconceptions(concept))
-        # At most every 4th question — never dominate the session
-        if qn > 0 and qn % 4 == 0:
-            return {
-                "activity": "MISCONCEPTION_CHECK",
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": f"open MC soft check (n_open={n_open}, q={qn})",
-                "force": False,
-            }
-
-    # 6b) Breadth-before-depth mastery gate
-    # Stay on current concept until a solid "bubble" exists (avg mastery + few open MCs).
-    # Blocks soft jumps to brand-new named concepts while foundations are thin.
-    if concept and cid:
-        m = average_mastery(concept)
-        n_open = len(open_misconceptions(concept))
-        if m < 0.45 or n_open >= 3:
-            # Prefer explanation/retrieval on SAME concept — not transfer to elsewhere
-            scores = {d: (clamp(concept.get(d)) or 0.0) for d in DIMENSIONS}
-            weakest = min(scores, key=scores.get)
-            act = DIM_TO_ACTIVITY.get(weakest, "EXPLANATION")
-            if act == "TRANSFER":
-                act = "EXPLANATION"
-            return {
-                "activity": act,
-                "concept_id": cid,
-                "subject_id": sid,
-                "reason": (
-                    f"mastery gate: stay on {cid} "
-                    f"(avg={m:.2f}, open_mc={n_open}) — consolidate before new topic"
-                ),
-                "force": False,
-            }
-
-    # 7) Free choice
-    return {
-        "activity": None,
-        "concept_id": cid,
-        "subject_id": sid,
-        "reason": "no strong policy signal — LLM may choose activity",
-        "force": False,
-    }
+# suggest_next_activity → policy.py
 
 
 # ------------------------------------------------------------
-# FSRS-inspired spaced repetition (Phase D)
-# Pure Python; no external package. Desired retention ~90%.
-# Grade: 1=Again, 2=Hard, 3=Good, 4=Easy
+# FSRS-inspired spaced repetition
 # ------------------------------------------------------------
-
 FSRS_REQUEST_RETENTION = 0.90
 FSRS_MAX_INTERVAL_DAYS = 365.0
 FSRS_MIN_STABILITY = 0.1
@@ -2678,390 +2391,21 @@ def apply_assessment(
 # MODEL OUTPUT PARSING
 # ============================================================
 
-def extract_json_object(text):
-    """
-    Robustly extract a JSON object from an LLM response.
-
-    Handles:
-      plain JSON
-      ```json ... ```
-      text surrounding JSON
-    """
-
-    text = text.strip()
-
-    # Remove markdown fences
-    text = re.sub(
-        r"^```(?:json)?\s*",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    text = re.sub(
-        r"\s*```$",
-        "",
-        text
-    )
-
-    # First attempt: entire response
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        pass
-
-    # Common model slip: trailing commas before } or ]
-    try:
-        fixed = re.sub(r",\s*([}\]])", r"\1", text)
-        value = json.loads(fixed)
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        pass
-
-    # Find first JSON object
-    start = text.find("{")
-
-    if start == -1:
-        return None
-
-    depth = 0
-    in_string = False
-    escaped = False
-
-    for i in range(
-        start,
-        len(text)
-    ):
-
-        char = text[i]
-
-        if escaped:
-            escaped = False
-            continue
-
-        if char == "\\":
-            escaped = True
-            continue
-
-        if char == '"':
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char == "{":
-            depth += 1
-
-        elif char == "}":
-            depth -= 1
-
-            if depth == 0:
-
-                candidate = text[
-                    start:i + 1
-                ]
-
-                try:
-                    value = json.loads(
-                        candidate
-                    )
-
-                    if isinstance(
-                        value,
-                        dict
-                    ):
-                        return value
-
-                except Exception:
-                    pass
-
-                break
-
-    return None
-
+# extract_json_object → llm.py
 
 # ============================================================
 # MODEL COMMUNICATION
 # ============================================================
 
-def _normalize_think(think_val):
-    if isinstance(think_val, str):
-        t = think_val.strip().lower()
-        if t in ("none", "off", "false", "0"):
-            return False
-        if t in ("true", "1", "on"):
-            return True
-    return think_val
+# _normalize_think → llm.py
 
+# _decode_json_string_prefix → llm.py
 
-def _decode_json_string_prefix(buffer, start_idx):
-    """Decode a JSON string starting at start_idx (first char after opening quote)."""
-    i = start_idx
-    out = []
-    while i < len(buffer):
-        ch = buffer[i]
-        if ch == "\\":
-            if i + 1 >= len(buffer):
-                break
-            nxt = buffer[i + 1]
-            escapes = {
-                "n": "\n", "t": "\t", "r": "\r",
-                '"': '"', "\\": "\\", "/": "/",
-            }
-            out.append(escapes.get(nxt, nxt))
-            i += 2
-            continue
-        if ch == '"':
-            break
-        out.append(ch)
-        i += 1
-    return "".join(out)
+# extract_partial_response_field → llm.py
 
+# extract_partial_routing_action → llm.py
 
-def extract_partial_response_field(buffer):
-    """
-    Best-effort extract of the JSON "response" string value while the
-    object is still streaming (may be incomplete / unclosed).
-    Returns decoded text or None if the field has not started yet.
-    """
-    if not buffer:
-        return None
-    m = re.search(r'"response"\s*:\s*"', buffer)
-    if not m:
-        return None
-    return _decode_json_string_prefix(buffer, m.end())
-
-
-def extract_partial_routing_action(buffer):
-    """
-    Best-effort extract of routing.action from a partial JSON buffer.
-    Returns action string or None if not yet present.
-    """
-    if not buffer:
-        return None
-    m = re.search(
-        r'"routing"\s*:\s*\{[^}]*?"action"\s*:\s*"([^"]+)"',
-        buffer,
-        flags=re.DOTALL,
-    )
-    if m:
-        return m.group(1).strip().lower()
-    # Flat fallback if model emits action near the start
-    m2 = re.search(r'"action"\s*:\s*"(continue|switch|new_subject|list_subjects|clarify)"', buffer)
-    if m2:
-        return m2.group(1).strip().lower()
-    return None
-
-
-def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
-    """
-    Call Ollama native /api/chat.
-    Field name is "think" (not "thinking"). THINK=False disables CoT.
-    When STREAM is True, live-prints the learner-facing response field
-    as tokens arrive (JSON is still collected in full for parsing).
-
-    on_response_delta(text_so_far, delta): optional callback for web SSE.
-    live_print: override console printing (default = STREAM and no callback).
-    """
-    think_val = _normalize_think(THINK)
-    use_stream = STREAM if stream is None else bool(stream)
-    if on_response_delta is not None:
-        use_stream = True
-    if live_print is None:
-        live_print = bool(STREAM) and on_response_delta is None
-
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "stream": use_stream,
-        "think": think_val,
-        # Force structured JSON — cuts most parse failures / second-call retries
-        "format": "json",
-        "options": {
-            "temperature": TEMPERATURE,
-            "num_predict": MAX_OUTPUT_TOKENS,
-        },
-    }
-
-    ask_model.did_stream_response = False
-    t0 = datetime.now()
-
-    if not use_stream:
-        response = requests.post(
-            MODEL_URL,
-            json=payload,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-        message = data.get("message") or {}
-        content = message.get("content") or ""
-        thinking_text = message.get("thinking") or ""
-        if not content:
-            content = thinking_text
-        total_ns = data.get("total_duration") or 0
-        prompt_ns = data.get("prompt_eval_duration") or 0
-        eval_ns = data.get("eval_duration") or 0
-        load_ns = data.get("load_duration") or 0
-        eval_n = data.get("eval_count") or 0
-        prompt_n = data.get("prompt_eval_count") or 0
-        total_s = (total_ns / 1e9) if total_ns else None
-        eval_s = (eval_ns / 1e9) if eval_ns else None
-        ask_model.last_stats = {
-            "model": MODEL_NAME,
-            "think_requested": think_val,
-            "thinking_returned": bool(thinking_text),
-            "thinking_chars": len(thinking_text),
-            "eval_count": eval_n,
-            "prompt_eval_count": prompt_n,
-            "total_s": round(total_s, 2) if total_s is not None else None,
-            "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-            "eval_s": round(eval_s, 3) if eval_s is not None else None,
-            "load_s": round(load_ns / 1e9, 3) if load_ns else None,
-            "ttft_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-            "out_tok_per_s": round(eval_n / eval_s, 1) if eval_s and eval_n else None,
-            "streamed": False,
-        }
-        try:
-            from metrics_lib import log_call_from_stats
-            log_call_from_stats(ask_model.last_stats)
-        except Exception:
-            pass
-        return content
-
-    # ---- streaming path ----
-    response = requests.post(
-        MODEL_URL,
-        json=payload,
-        timeout=REQUEST_TIMEOUT,
-        stream=True,
-    )
-    response.raise_for_status()
-
-    full_content = []
-    thinking_parts = []
-    eval_count = 0
-    prompt_eval_count = 0
-    total_ns = 0
-    prompt_ns = 0
-    eval_ns = 0
-    load_ns = 0
-    header_shown = False
-    printed_len = 0
-    ttft_s = None
-
-    for line in response.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        message = data.get("message") or {}
-        piece = message.get("content") or ""
-        think_piece = message.get("thinking") or ""
-        if piece:
-            full_content.append(piece)
-            if ttft_s is None:
-                ttft_s = (datetime.now() - t0).total_seconds()
-        if think_piece:
-            thinking_parts.append(think_piece)
-
-        if data.get("eval_count"):
-            eval_count = data["eval_count"]
-        if data.get("prompt_eval_count"):
-            prompt_eval_count = data["prompt_eval_count"]
-        if data.get("total_duration"):
-            total_ns = data["total_duration"]
-        if data.get("prompt_eval_duration"):
-            prompt_ns = data["prompt_eval_duration"]
-        if data.get("eval_duration"):
-            eval_ns = data["eval_duration"]
-        if data.get("load_duration"):
-            load_ns = data["load_duration"]
-
-        # Live-print ONLY for teaching turns (continue / clarify).
-        # list_subjects / switch / new_subject are handled by Python UI —
-        # streaming those responses causes double questions / double lists.
-        buf = "".join(full_content)
-        action = extract_partial_routing_action(buf)
-        streamable = action in (None, "continue", "clarify")
-        # Wait until routing.action is known before printing, so we never
-        # start a TUTOR block that must later be superseded by a resume banner.
-        if action in ("continue", "clarify"):
-            partial = extract_partial_response_field(buf)
-            if partial is not None:
-                if not header_shown:
-                    if live_print:
-                        print()
-                        divider()
-                        print(c("TUTOR", BOLD + GREEN))
-                        divider()
-                        print()
-                    header_shown = True
-                    ask_model.did_stream_response = True
-                if len(partial) > printed_len:
-                    delta = partial[printed_len:]
-                    printed_len = len(partial)
-                    if live_print:
-                        print(delta, end="", flush=True)
-                    if on_response_delta is not None:
-                        try:
-                            on_response_delta(partial, delta)
-                        except Exception:
-                            pass
-        elif action in ("list_subjects", "switch", "new_subject"):
-            # Explicitly do not stream the response body
-            pass
-
-        if data.get("done"):
-            break
-
-    if header_shown and live_print:
-        print()  # end streamed body
-
-    content = "".join(full_content)
-    thinking_text = "".join(thinking_parts)
-    if not content and thinking_text:
-        content = thinking_text
-
-    elapsed = (datetime.now() - t0).total_seconds()
-    total_s = (total_ns / 1e9) if total_ns else elapsed
-    eval_s = (eval_ns / 1e9) if eval_ns else None
-    # Prefer wall-clock first token; fall back to prompt_eval_duration
-    if ttft_s is None and prompt_ns:
-        ttft_s = prompt_ns / 1e9
-    ask_model.last_stats = {
-        "model": MODEL_NAME,
-        "think_requested": think_val,
-        "thinking_returned": bool(thinking_text),
-        "thinking_chars": len(thinking_text),
-        "eval_count": eval_count,
-        "prompt_eval_count": prompt_eval_count,
-        "total_s": round(total_s, 2),
-        "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-        "eval_s": round(eval_s, 3) if eval_s is not None else None,
-        "load_s": round(load_ns / 1e9, 3) if load_ns else None,
-        "ttft_s": round(ttft_s, 3) if ttft_s is not None else None,
-        "out_tok_per_s": round(eval_count / eval_s, 1) if eval_s and eval_count else None,
-        "streamed": True,
-    }
-    try:
-        from metrics_lib import log_call_from_stats
-        log_call_from_stats(ask_model.last_stats)
-    except Exception:
-        pass
-    return content
-
-
-ask_model.last_stats = {}
-ask_model.did_stream_response = False
-
+# ask_model → llm.py
 
 def extract_question_from_text(text):
     """Best-effort: last interrogative sentence, else truncated response."""
@@ -3288,62 +2632,10 @@ def print_model_stats():
         pass
 
 
-JSON_REMINDER = (
-    "Your previous reply was not valid JSON. "
-    "Reply again with ONLY a single valid JSON object. "
-    "No markdown, no fences, no extra text. "
-    "Use exactly the required structure with keys: "
-    "response, routing, assessment, session."
-)
+# JSON_REMINDER → llm.py
 
 
-def ask_model_with_json_retry(messages):
-    """
-    Call the model once. If the reply is not valid JSON,
-    do exactly one retry with a short reminder (non-streaming).
-    Returns (raw_text, parsed_dict_or_None).
-    Sets ask_model.last_json_retry when a second call was needed.
-    """
-    ask_model.last_json_retry = False
-    raw = ask_model(messages)
-    parsed = extract_json_object(raw)
-
-    if parsed is not None and isinstance(parsed, dict) and (
-        "response" in parsed or "routing" in parsed
-    ):
-        if getattr(ask_model, "last_stats", None) is not None:
-            ask_model.last_stats["json_retry"] = False
-        return raw, parsed
-
-    # First call produced invalid/truncated JSON (often num_predict cut).
-    # Do NOT stream the retry — avoids a second TUTOR block on screen.
-    first_streamed = bool(getattr(ask_model, "did_stream_response", False))
-    if first_streamed:
-        print()
-        print(c("(antwoord opnieuw opbouwen…)", GRAY))
-        print()
-
-    failed_preview = (raw or "")[:400]
-    retry_messages = list(messages) + [
-        {"role": "assistant", "content": failed_preview},
-        {"role": "user", "content": JSON_REMINDER},
-    ]
-
-    try:
-        ask_model.last_json_retry = True
-        # Force non-stream so only one final TUTOR body is shown via show_tutor
-        raw2 = ask_model(retry_messages, stream=False)
-        # Retry was silent: allow show_tutor to print the final response once
-        ask_model.did_stream_response = False
-        if getattr(ask_model, "last_stats", None) is not None:
-            ask_model.last_stats["json_retry"] = True
-        parsed2 = extract_json_object(raw2)
-        if parsed2 is not None:
-            return raw2, parsed2
-        return raw2, None
-    except Exception:
-        return raw, None
-
+# ask_model_with_json_retry → llm.py
 
 # ============================================================
 # CONTEXT BUILDING
@@ -3960,16 +3252,37 @@ def print_policy(policy):
 # ============================================================
 
 def get_last_resume_for_subject(state, subject_id):
-    """Return the most recent resume_instruction for a subject from history or active session."""
-    # Prefer active session if same subject
-    active = state.get("active_session", {})
-    if active.get("subject_id") == subject_id and active.get("resume_instruction"):
-        return active["resume_instruction"]
+    """Best learner-facing question to continue for this subject.
 
-    for h in reversed(state.get("history", [])):
+    Priority:
+      1. Open pedagogical thread still unanswered (open_threads)
+      2. last_tutor_question / resume_instruction on active session if same subject
+      3. Last history.resume_instruction for this subject
+    """
+    active = state.get("active_session") or {}
+    if active.get("subject_id") == subject_id:
+        for t in reversed(active.get("open_threads") or []):
+            if not isinstance(t, dict):
+                continue
+            if t.get("status") in ("open", "scaffolded", "hinted"):
+                q = (t.get("q") or "").strip()
+                if q and is_learner_facing_resume(q):
+                    return q
+        for key in ("last_tutor_question", "resume_instruction"):
+            q = (active.get(key) or "").strip()
+            if q and is_learner_facing_resume(q):
+                return q
+
+    for h in reversed(state.get("history") or []):
+        if not isinstance(h, dict):
+            continue
         if h.get("subject_id") == subject_id and h.get("resume_instruction"):
-            return h["resume_instruction"]
+            q = str(h.get("resume_instruction") or "").strip()
+            if q:
+                return q
     return None
+
+
 
 
 def get_recent_concepts(state, subject_id, limit=3):
@@ -4093,6 +3406,22 @@ def start_session(state, subject_id=None, pending_goal=False, is_resume=False):
             prev_resume = old.get("resume_instruction") or prev_resume
             prev_thread = old.get("session_thread")
 
+    # Prefer the best open question for this subject (not only history tail)
+    if is_resume and subject_id:
+        better = get_last_resume_for_subject(state, subject_id)
+        if better:
+            prev_resume = better
+
+    open_threads = []
+    if is_resume and prev_resume:
+        open_threads = [{
+            "id": "t_resume",
+            "q": str(prev_resume).strip()[:280],
+            "status": "open",
+            "tries": 1,
+            "activity": "RETRIEVAL",
+        }]
+
     state["active_session"] = {
         "active": True,
         "subject_id": subject_id,
@@ -4110,6 +3439,7 @@ def start_session(state, subject_id=None, pending_goal=False, is_resume=False):
         "recent_questions": (
             [prev_resume] if (is_resume and prev_resume) else []
         ),
+        "open_threads": open_threads,
     }
 
     save_state(state)
@@ -4318,6 +3648,19 @@ def close_session(state, resume_instruction=None):
 
     active = state["active_session"]
 
+    # Prefer explicit instruction, else open unanswered thread / last question
+    if not resume_instruction:
+        for t in reversed(active.get("open_threads") or []):
+            if isinstance(t, dict) and t.get("status") in ("open", "scaffolded", "hinted"):
+                q = (t.get("q") or "").strip()
+                if q:
+                    resume_instruction = q
+                    break
+        if not resume_instruction:
+            resume_instruction = (
+                active.get("last_tutor_question")
+                or active.get("resume_instruction")
+            )
     if resume_instruction:
         active["resume_instruction"] = resume_instruction
 
@@ -4693,76 +4036,44 @@ def print_reviews(state):
 # ============================================================
 
 def main():
+    """Thin CLI: banner + input loop calling core.handle_turn (same path as web)."""
+    import core as C
 
     print()
-
-    print(
-        c(
-            "============================================================",
-            CYAN
-        )
-    )
-
-    print(
-        c(
-            "                 SOCRATIC OFFLINE TUTOR",
-            BOLD + CYAN
-        )
-    )
-
-    print(
-        c(
-            "                         v0.4.0",
-            CYAN
-        )
-    )
-
-    print(
-        c(
-            "============================================================",
-            CYAN
-        )
-    )
-
+    print(c("============================================================", CYAN))
+    print(c("                 SOCRATIC OFFLINE TUTOR", BOLD + CYAN))
+    print(c(f"                         v{__version__}", CYAN))
+    print(c("============================================================", CYAN))
     print()
-
     print(f"Model : {MODEL_NAME}")
     print(f"Think : {THINK}  (False = no chain-of-thought)")
     print(f"Stream: {STREAM}")
     print(f"State : {STATE_FILE}")
-
     print()
 
     state = load_state()
-    base_prompt = load_system_prompt()
-
-    rebuild_review_queue(
-        state
-    )
-
+    rebuild_review_queue(state)
     save_state(state)
+    conversation: list = []
 
-    conversation = []
-
-    # --------------------------------------------------------
-    # RESUME EXISTING SESSION
-    # --------------------------------------------------------
-
-    active = state[
-        "active_session"
-    ]
-
+    active = state.get("active_session") or {}
     if active.get("active") and active.get("subject_id"):
-        print(c("Een actieve sessie is gevonden.", YELLOW))
-        # Mark as just resumed so first LLM turn prefers retrieval
+        sid = active["subject_id"]
+        sub = (state.get("subjects") or {}).get(sid) or {}
+        title = sub.get("title") or sid
+        print(c(f"Open sessie gevonden: {title}", YELLOW))
+        if sub.get("goal"):
+            g = str(sub.get("goal"))
+            print(f"Leerdoel: {g[:120]}{'…' if len(g) > 120 else ''}")
+        print("Nog geen vraag — kies zelf:")
+        print(c('  "ik wil verder"  /  "ik wil verder met …"  /  /subjects  /  /tree', CYAN))
+        print()
+        # Retrieval on first real turn, but do not dump a question until the learner engages
         active["just_resumed"] = True
         active["current_activity"] = active.get("current_activity") or "RETRIEVAL"
         save_state(state)
-        show_resume_banner(state, active["subject_id"])
-
     else:
-
-        n_subjects = len(state.get("subjects", {}))
+        n_subjects = len(state.get("subjects") or {})
         if n_subjects > 0:
             print(f"Je hebt {n_subjects} onderwerp(en). Hervat met:")
             print(c('  "ik wil verder met agents"', CYAN))
@@ -4780,805 +4091,142 @@ def main():
             print("Daarna beschrijf je in gewone taal wat je wilt leren.")
             print()
 
-    # --------------------------------------------------------
-    # MAIN INPUT LOOP
-    # --------------------------------------------------------
-
     while True:
-
-        # IMPORTANT:
-        # We print YOU only once per actual input.
-        # No automatic question is inserted after every response.
-
         show_you_prompt()
-
         try:
             user_input = input("> ")
-
-        except (
-            KeyboardInterrupt,
-            EOFError
-        ):
-
+        except (KeyboardInterrupt, EOFError):
             print()
-
-            print(
-                c(
-                    "Sessie wordt opgeslagen...",
-                    YELLOW
-                )
-            )
-
-            close_session(
-                state,
-                state[
-                    "active_session"
-                ].get(
-                    "resume_instruction"
-                )
-            )
-
-            print(
-                c(
-                    "Saved.",
-                    GREEN
-                )
-            )
-
+            print(c("Sessie wordt opgeslagen...", YELLOW))
+            act = state.get("active_session") or {}
+            if act.get("active"):
+                close_session(state, act.get("resume_instruction"))
+            save_state(state)
+            print(c("Saved.", GREEN))
             break
 
-        user_input = user_input.strip()
-
-        # Empty ENTER should do NOTHING.
+        user_input = (user_input or "").strip()
         if not user_input:
             continue
 
-        # ----------------------------------------------------
-        # COMMANDS
-        # ----------------------------------------------------
-
-        if user_input.lower() == "/quit":
-
-            active = state[
-                "active_session"
-            ]
-
-            close_session(
-                state,
-                active.get(
-                    "resume_instruction"
-                )
-            )
-
-            print()
-
-            print(
-                c(
-                    "Learner state saved.",
-                    GREEN
-                )
-            )
-
-            print(
-                "Session ended."
-            )
-
-            print()
-
-            break
-
-        if user_input.lower() == "/help":
-
-            print_help()
-            continue
-
-        if user_input.lower() in ("/debug tokens", "/debug", "/metrics"):
-            try:
-                from metrics_lib import format_breakdown, get_last_breakdown, print_summary
-                policy = suggest_next_activity(state)
-                build_messages(base_prompt, state, conversation, policy=policy)
-                bd = get_last_breakdown()
-                print()
-                if bd:
-                    print(format_breakdown(bd.get("components") or [], bd.get("total_tokens_est")))
-                    print(f"system_hash={bd.get('system_hash')} mode={bd.get('mode')}")
-                else:
-                    print("No breakdown available.")
-                print()
-                print_summary(10)
-            except Exception as e:
-                print(c(f"Metrics error: {e}", YELLOW))
-            continue
-
-        if user_input.lower() == "/state":
-
-            print_state_summary(
-                state
-            )
-
-            continue
-
-        if user_input.lower() == "/state full" or user_input.lower().startswith("/state dump"):
-            # Write full JSON to file (CLI paste is too large); print short summary only
+        # Optional: dump full JSON to file for analysis (in addition to handle_turn text)
+        low = user_input.lower()
+        if low == "/state full" or low.startswith("/state dump") or low.startswith("/state full "):
             dump_path = Path("learner_state_full.json")
             parts = user_input.split(None, 2)
-            if len(parts) >= 3 and parts[1].lower() in ("full", "dump"):
-                # /state dump myfile.json
+            if len(parts) >= 3:
                 dump_path = Path(parts[2].strip() or "learner_state_full.json")
-            elif len(parts) == 2 and parts[1].lower() == "dump":
-                dump_path = Path("learner_state_full.json")
             try:
                 dump_path.write_text(
                     json.dumps(state, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
                 print(c(f"Full state written to: {dump_path.resolve()}", GREEN))
-                print("Use:  cat learner_state_full.json | less")
-                print("Or copy the file for analysis. Summary below:")
             except Exception as e:
                 print(c(f"Could not write dump: {e}", RED))
-            print_state_summary(state)
-            continue
-
-        if user_input.lower() == "/subjects":
-            print_subjects(state)
-            continue
-
-        if user_input.lower() in ("/tree", "/concepts"):
-            print_concept_tree(state)
-            continue
-
-        if user_input.lower() == "/review":
-            print_reviews(state)
-            continue
-
-        if user_input.lower() == "/reset":
-
-            conversation = []
-
-            print()
-
-            print(
-                c(
-                    "Conversation context reset.",
-                    YELLOW
-                )
-            )
-
-            print(
-                "Learner state blijft behouden."
-            )
-
-            print()
-
-            continue
-
-        # ----------------------------------------------------
-        # NEW SUBJECT
-        # ----------------------------------------------------
-
-        if user_input.lower().startswith("/new "):
-
-            subject_name = user_input[5:].strip()
-
-            if not subject_name:
-                print("Gebruik: /new <onderwerp>")
-                continue
-
-            if state["active_session"].get("active"):
-                close_session(
-                    state,
-                    state["active_session"].get("resume_instruction")
-                )
-
-            subject_id = ensure_subject(
-                state,
-                subject_name,
-                subject_name
-            )
-
-            start_session(state, subject_id, pending_goal=True)
-            conversation = []
-
-            print()
-            print(c(f"Nieuw onderwerp: {subject_name}", GREEN))
-            print()
-            print("Wat wil je met dit onderwerp bereiken?")
-            print("(Beschrijf je leerdoel in één of twee zinnen.)")
-            print()
-            continue
-
-        # ----------------------------------------------------
-        # SWITCH SUBJECT
-        # ----------------------------------------------------
-
-        if user_input.lower().startswith(
-            "/switch "
-        ):
-
-            subject_name = user_input[
-                8:
-            ].strip()
-
-            if not subject_name:
-
-                print(
-                    "Gebruik: /switch <onderwerp>"
-                )
-
-                continue
-
-            if state[
-                "active_session"
-            ].get("active"):
-
-                close_session(
-                    state,
-                    state[
-                        "active_session"
-                    ].get(
-                        "resume_instruction"
-                    )
-                )
-
-            subject_id = ensure_subject(
-                state,
-                subject_name,
-                subject_name
-            )
-
-            start_session(
-                state,
-                subject_id
-            )
-
-            conversation = []
-
-            print()
-
-            print(
-                c(
-                    f"Overgeschakeld naar: {subject_name}",
-                    GREEN
-                )
-            )
-
-            print()
-
-            continue
-
-        # ----------------------------------------------------
-        # RESUME
-        # ----------------------------------------------------
-
-        if user_input.lower() == "/resume":
-
-            active = state["active_session"]
-
-            if active.get("active"):
-                print("De huidige sessie is al actief.")
-                continue
-
-            history = state.get("history", [])
-            if not history:
-                print("Geen vorige sessie om te hervatten.")
-                continue
-
-            last = history[-1]
-            subject_id = last.get("subject_id")
-            if not subject_id:
-                print("Laatste sessie bevat geen onderwerp.")
-                continue
-
-            start_session(state, subject_id, is_resume=True)
-            conversation = []
-            show_resume_banner(state, subject_id)
-            continue
-
-        # ----------------------------------------------------
-        # PENDING GOAL (first message after /new or new_subject)
-        # This message is ONLY the goal — not a learning answer.
-        # ----------------------------------------------------
-
-        active = state["active_session"]
-
-        if active.get("active") and active.get("pending_goal"):
-            sid = active.get("subject_id")
-            goal_text = user_input.strip()
-            if sid and sid in state["subjects"]:
-                state["subjects"][sid]["goal"] = goal_text
-                state["subjects"][sid]["updated_at"] = datetime.now().isoformat()
-            active["pending_goal"] = False
-            save_state(state)
-            print()
-            print(c("Leerdoel opgeslagen.", GREEN))
-            print()
-
-            # Feed the LLM a clear "start teaching" signal, not the raw goal
-            # as if it were an answer to a content question.
-            title = state["subjects"].get(sid, {}).get("title", sid)
-            start_msg = (
-                f"Leerdoel voor '{title}' is vastgelegd: {goal_text}\n\n"
-                f"Start nu de les. Stel één korte Socratische openingsvraag "
-                f"om te peilen wat de leerling al weet over dit onderwerp. "
-                f"Gebruik routing.action = continue."
-            )
-            conversation.clear()
-            conversation.append({
-                "role": "user",
-                "content": start_msg
-            })
-            state["active_session"]["question_number"] = 1
-            state["active_session"]["last_activity"] = datetime.now().isoformat()
-            save_state(state)
-
-            # Jump straight to model call (skip re-appending user_input)
-            show_status("Generating...")
-            try:
-                policy = suggest_next_activity(state)
-                print_policy(policy)
-                messages = build_messages(base_prompt, state, conversation, policy=policy)
-                raw, result = ask_model_with_json_retry(messages)
-                print_model_stats()
-            except requests.exceptions.ConnectionError:
-                print()
-                print(c("ERROR: Could not connect to Ollama.", RED))
-                conversation.pop()
-                continue
-            except Exception as e:
-                print()
-                print(c("ERROR communicating with model:", RED))
-                print(str(e))
-                conversation.pop()
-                continue
-
-            if not result:
-                answer = (raw or "").strip()
-                print()
-                print(c("Warning: model returned non-JSON output (after retry).", YELLOW))
-                show_tutor(
-                    answer if answer else "...",
-                    already_streamed=getattr(ask_model, "did_stream_response", False),
-                )
-                conversation.append({"role": "assistant", "content": answer})
-                if state.get("active_session", {}).get("active"):
-                    state["active_session"]["just_resumed"] = False
-                save_state(state)
-                continue
-
-            answer = str(result.get("response", "")).strip() or "Wat weet je al over dit onderwerp?"
-            session_info = result.get("session", {})
-            if isinstance(session_info, dict):
-                ri = session_info.get("resume_instruction")
-                if ri and is_learner_facing_resume(str(ri)):
-                    state["active_session"]["resume_instruction"] = str(ri).strip()
-            update_session_memory(state, session_info if isinstance(session_info, dict) else {}, answer)
-            state["active_session"]["just_resumed"] = False
-            state["active_session"]["last_activity"] = datetime.now().isoformat()
-            save_state(state)
-            show_tutor(
-                answer,
-                already_streamed=getattr(ask_model, "did_stream_response", False),
-            )
-            conversation.append({"role": "assistant", "content": answer})
-            save_state(state)
-            continue
-
-        # ----------------------------------------------------
-        # SLASH COMMAND ALIASES + UNKNOWN
-        # ----------------------------------------------------
-
-        cmd_lower = user_input.lower().strip()
-
-        if cmd_lower in ("/subject", "/subjects"):
-            print_subjects(state)
-            continue
-
-        if cmd_lower in ("/tree", "/concepts"):
-            print_concept_tree(state)
-            continue
-
-        if user_input.startswith("/") and not cmd_lower.startswith(
-            ("/new ", "/switch ", "/state", "/subjects", "/subject",
-             "/tree", "/concepts",
-             "/review", "/reset", "/quit", "/help", "/resume")
-        ):
-            print()
-            print(c(f"Onbekend commando: {user_input.split()[0]}", YELLOW))
-            print("Typ /help voor de lijst met commando's.")
-            print()
-            continue
-
-        # ----------------------------------------------------
-        # USER MESSAGE → LLM (intent / routing is LLM-owned)
-        # Explicit /commands above still short-circuit.
-        # ----------------------------------------------------
-
-        conversation.append({
-            "role": "user",
-            "content": user_input
-        })
-
-        if active.get("active"):
-            state["active_session"]["question_number"] += 1
-            state["active_session"]["last_activity"] = datetime.now().isoformat()
-            # Learner signals "we already did this" → force advance next policy
-            low = user_input.lower()
-            already = any(
-                p in low
-                for p in (
-                    "dat hebben we",
-                    "hebben we al",
-                    "al gedaan",
-                    "al uitgerekend",
-                    "al toegelicht",
-                    "al uitgelegd",
-                    "daarnet gedaan",
-                    "net gedaan",
-                    "duizend keer",
-                    "al 10 keer",
-                    "al gezegd",
-                    "geen correctie nodig",
-                    "omg dat heb ik",
-                )
-            )
-            if already:
-                state["active_session"]["must_advance"] = True
-                state["active_session"]["repeat_streak"] = int(
-                    state["active_session"].get("repeat_streak") or 0
-                ) + 1
-            # Learner rejects a thread / shifts goal → drop stale resume + resume force
-            goal_shift = any(
-                p in low
-                for p in (
-                    "niet belangrijk",
-                    "wil geen",
-                    "wil niet",
-                    "ik wil begrijpen",
-                    "ik wil meer",
-                    "liever over",
-                    "overstappen",
-                    "iets anders",
-                )
-            )
-            if goal_shift:
-                state["active_session"]["just_resumed"] = False
-                state["active_session"]["resume_instruction"] = None
-                state["active_session"]["must_advance"] = True
-
-            # Stuck signals: "geen idee", question unclear, meta "what did you mean"
-            stuck = any(
-                p in low
-                for p in (
-                    "geen idee",
-                    "weet ik niet",
-                    "dat weet ik niet",
-                    "geen flauw",
-                    "snap je vraag niet",
-                    "snap de vraag niet",
-                    "vraag is onduidelijk",
-                    "onduidelijk",
-                    "wat bedoel je",
-                    "wat beodel",
-                    "welk fenomeen",
-                    "welke vergelijking",
-                    "geef eens een hint",
-                    "geef een hint",
-                    "hint",
-                    "leg uit",
-                    "leg het me uit",
-                    "leg me uit",
-                    "vertel het",
-                    "zeg het gewoon",
-                    "wat wil je",
-                    "wat is de formule",
-                    "wat is de formula",
-                    "wat is die formule",
-                    "formule voor",
-                    "foirumel",
-                    "geef de formule",
-                    "schrijf de formule",
-                )
-            )
-            explicit_teach = any(
-                p in low
-                for p in (
-                    "leg uit",
-                    "leg het me uit",
-                    "leg me uit",
-                    "vertel het",
-                    "zeg het gewoon",
-                    "gewoon uitleggen",
-                    "wat is de formule",
-                    "wat is de formula",
-                    "wat is die formule",
-                    "formule voor",
-                    "foirumel",
-                    "geef de formule",
-                    "schrijf de formule",
-                    "wat betekent",
-                    "definieer",
-                    "niet zo snel",
-                    "te snel",
-                    "langzamer",
-                    "meer diepgang",
-                    "toelichten",
-                    "vanwaar komen",
-                    "wat is die k",
-                    "wat is kappa",
-                    "wat zijn die formules",
-                    "wat zijn die symbolen",
-                    "abstract",
-                    "kan me er niks bij",
-                    "go slow",
-                    "slow down",
-                    "nieuwe concepten",
-                    "new concepts",
-                    "wtf",
-                    "was dat allemaal",
-                    "te veel",
-                    "too much",
-                    "too fast",
-                    "too many terms",
-                    "te veel termen",
-                )
-            )
-            if stuck:
-                hc = int(state["active_session"].get("hint_count") or 0) + 1
-                state["active_session"]["hint_count"] = hc
-                state["active_session"]["stuck_signal"] = True
-                state["active_session"]["force_scaffold"] = True
-                if explicit_teach or hc >= 2:
-                    # Hard teach: full answer this turn, then close thread
-                    state["active_session"]["force_full_teach"] = True
-                    state["active_session"]["must_advance"] = True
-            else:
-                state["active_session"]["stuck_signal"] = False
-            save_state(state)
-
-        # ----------------------------------------------------
-        # MODEL CALL (with one JSON retry)
-        # ----------------------------------------------------
-
-        show_status("Generating...")
 
         try:
-            policy = suggest_next_activity(state)
-            print_policy(policy)
-            messages = build_messages(
-                base_prompt,
-                state,
-                conversation,
-                policy=policy,
+            result = C.handle_turn(
+                user_input,
+                state=state,
+                conversation=conversation,
+                save=True,
+                stream=STREAM,
             )
-            raw, result = ask_model_with_json_retry(messages)
-            print_model_stats()
-
-        except requests.exceptions.ConnectionError:
-            print()
-            print(c("ERROR: Could not connect to Ollama.", RED))
-            print()
-            print("Controleer bijvoorbeeld:")
-            print("  systemctl status ollama")
-            print("  ollama list")
-            print()
-            conversation.pop()
-            continue
-
         except Exception as e:
-            print()
-            print(c("ERROR communicating with model:", RED))
-            print(str(e))
-            print()
-            conversation.pop()
+            print(c(f"Turn error: {e}", RED))
             continue
 
-        # ----------------------------------------------------
-        # NON-JSON FALLBACK
-        # ----------------------------------------------------
+        # Reload state reference if handle_turn mutated nested objects (same dict)
+        kind = (result or {}).get("kind") or "message"
+        answer = (result or {}).get("response") or ""
+        stats = (result or {}).get("stats") or {}
 
-        if not result:
-            answer = (raw or "").strip()
+        if kind == "quit":
             print()
-            print(c("Warning: model returned non-JSON output (after retry).", YELLOW))
-            preview = answer[:400] + ("..." if len(answer) > 400 else "")
-            if preview and not getattr(ask_model, "did_stream_response", False):
-                print(c(f"Raw preview: {preview}", GRAY))
+            print(c(answer or "Session ended.", GREEN))
             print()
-            show_tutor(
-                answer if answer else "Ik kon geen geldig antwoord genereren.",
-                already_streamed=getattr(ask_model, "did_stream_response", False),
-            )
-            conversation.append({
-                "role": "assistant",
-                "content": answer
-            })
-            # Still leave resume mode so policy does not force RETRIEVAL forever
-            if state.get("active_session", {}).get("active"):
-                state["active_session"]["just_resumed"] = False
-                save_state(state)
-            save_state(state)
+            break
+
+        if kind == "resume":
+            r = (result or {}).get("resume") or {}
+            title = r.get("title") or ""
+            print(c(f"Hervat: {title}", BOLD + CYAN) if title else "")
+            if r.get("goal"):
+                print(f"Leerdoel : {r.get('goal')}")
+            recent = r.get("recent_concepts") or []
+            if recent:
+                print("Recent   : " + ", ".join(
+                    (c.get("title") if isinstance(c, dict) else str(c)) for c in recent
+                ))
+            q = answer or r.get("resume_question") or ""
+            if q:
+                print(c("Eerst even ophalen:", YELLOW))
+                streamed = bool(getattr(ask_model, "did_stream_response", False)) or bool(
+                    stats.get("streamed")
+                )
+                show_tutor(q, already_streamed=streamed)
+            _print_cli_stats(stats)
             continue
 
-        answer = str(result.get("response", "")).strip()
-        if not answer:
-            answer = (
-                "Ik kon geen geldig tutorantwoord "
-                "uit de modelrespons halen."
-            )
+        if kind in ("help", "state", "state_full", "debug", "reset", "reviews"):
+            print()
+            print(answer)
+            print()
+            continue
 
-        assessment = result.get("assessment", {})
-        session_info = result.get("session", {})
-        routing = result.get("routing", {})
+        if kind == "tree":
+            print()
+            print(answer)
+            print()
+            continue
 
-        # ----------------------------------------------------
-        # APPLY ROUTING (LLM-owned intent)
-        # ----------------------------------------------------
-
-        routed = apply_routing(state, routing, conversation)
-        if routed == "handled":
-            # list_subjects: subjects already printed — no extra LLM monologue
-            # clarify: show the disambiguation question
-            action = str((routing or {}).get("action") or "").lower()
-            if action == "clarify" and answer:
+        if kind == "subjects":
+            print()
+            print(c("SUBJECTS", BOLD + CYAN))
+            for s in (result or {}).get("subjects") or []:
+                print(f"  {s.get('title')}  (id={s.get('id')})")
+                if s.get("goal"):
+                    g = str(s["goal"])
+                    print(f"    goal: {g[:70]}{'…' if len(g) > 70 else ''}")
+                st = s.get("status")
+                if st:
+                    print(f"    {st}")
+            if answer:
+                print()
                 show_tutor(
                     answer,
                     already_streamed=getattr(ask_model, "did_stream_response", False),
                 )
-                conversation.append({"role": "assistant", "content": answer})
-            elif action == "list_subjects":
-                # Close the history turn so the next user message is not
-                # answered as a double-reply to "welke onderwerpen..."
-                subjects = state.get("subjects", {})
-                names = [
-                    s.get("title", sid)
-                    for sid, s in subjects.items()
-                ]
-                summary = (
-                    "Overzicht getoond. Onderwerpen: "
-                    + (", ".join(names) if names else "geen")
-                    + ". Wacht op keuze van de leerling."
-                )
-                conversation.append({
-                    "role": "assistant",
-                    "content": summary
-                })
-            save_state(state)
-            continue
-        if routed == "switched":
-            # Resume banner already posed the retrieval question.
-            # Skip a second stacked question from the LLM.
-            save_state(state)
-            continue
-        if routed == "new_subject":
-            # Goal prompt already shown by apply_routing.
-            # Do NOT show the LLM teaching question yet — that would
-            # interleave with the goal request.
-            save_state(state)
+            print()
             continue
 
-        # ----------------------------------------------------
-        # APPLY ASSESSMENT (only on continue)
-        # ----------------------------------------------------
+        if kind in ("new_subject", "clarify", "message") or answer:
+            streamed = bool(getattr(ask_model, "did_stream_response", False)) or bool(
+                stats.get("streamed")
+            ) or bool((result or {}).get("streamed_response"))
+            show_tutor(answer, already_streamed=streamed)
+            _print_cli_stats(stats)
+            continue
 
-        # If no active session but LLM continued teaching, open session
-        if not state["active_session"].get("active"):
-            sid = None
-            if isinstance(assessment, dict):
-                sid = assessment.get("subject")
-            if sid and is_valid_id(sid):
-                start_session(state, ensure_subject(state, sid, sid))
-            elif state.get("subjects"):
-                # fallback: stay without session — assessment may still create subject
-                pass
+        if not result.get("ok"):
+            print(c(answer or "Onbekende fout.", RED))
 
-        try:
-            apply_assessment(state, assessment)
-        except Exception as e:
-            print(c(f"State update warning: {e}", YELLOW))
 
-        # ----------------------------------------------------
-        # APPLY SESSION INFORMATION
-        # ----------------------------------------------------
-
-        if isinstance(session_info, dict):
-            resume_instruction = session_info.get("resume_instruction")
-            if resume_instruction:
-                text = str(resume_instruction).strip()
-                if is_learner_facing_resume(text):
-                    state["active_session"]["resume_instruction"] = text
-                elif not state["active_session"].get("resume_instruction"):
-                    sid = state["active_session"].get("subject_id")
-                    state["active_session"]["resume_instruction"] = (
-                        make_fallback_resume(state, sid) if sid else text
-                    )
-
-        # Working memory: thread + anti-repeat question log
-        # Detect similar question → ban it and force advance next turn.
-        # If not yet streamed, one silent retry; if already streamed, ban only
-        # (avoids double TUTOR block on screen).
-        try:
-            new_q = None
-            if isinstance(session_info, dict):
-                new_q = (
-                    session_info.get("last_question")
-                    or session_info.get("last_tutor_question")
-                    or session_info.get("resume_instruction")
-                )
-            if not new_q:
-                new_q = extract_question_from_text(answer)
-            active_chk = state.setdefault("active_session", {})
-            ban_list = list(active_chk.get("banned_questions") or [])
-            recent_list = list(active_chk.get("recent_questions") or [])
-            conflict = False
-            for prev in ban_list + recent_list[-3:]:
-                if questions_similar(new_q, prev, threshold=0.50):
-                    conflict = True
-                    break
-            if conflict:
-                if new_q and new_q not in ban_list:
-                    ban_list.append(new_q)
-                active_chk["banned_questions"] = ban_list[-8:]
-                active_chk["must_advance"] = True
-                active_chk["repeat_streak"] = int(active_chk.get("repeat_streak") or 0) + 1
-                already_streamed = bool(getattr(ask_model, "did_stream_response", False))
-                if already_streamed:
-                    print(c("  [anti-repeat] similar Q banned for next turns", YELLOW))
-                elif not active_chk.get("_anti_repeat_retried"):
-                    active_chk["_anti_repeat_retried"] = True
-                    print(c("  [anti-repeat] similar question — silent retry", YELLOW))
-                    policy2 = suggest_next_activity(state)
-                    messages2 = build_messages(
-                        base_prompt, state, conversation, policy=policy2
-                    )
-                    raw2, parsed2 = ask_model_with_json_retry(messages2)
-                    if isinstance(parsed2, dict) and parsed2.get("response"):
-                        answer = str(parsed2.get("response") or answer)
-                        if parsed2.get("session"):
-                            session_info = parsed2["session"]
-                        if parsed2.get("assessment"):
-                            assessment = parsed2["assessment"]
-                active_chk["_anti_repeat_retried"] = False
-        except Exception as _ar_err:
-            print(c(f"  [anti-repeat] skip: {_ar_err}", YELLOW))
-
-        update_session_memory(state, session_info if isinstance(session_info, dict) else {}, answer)
-
-        # After first successful turn, resume mode is done
-        state["active_session"]["just_resumed"] = False
-        state["active_session"]["last_activity"] = datetime.now().isoformat()
-
-        rebuild_review_queue(state)
-        save_state(state)
-
-        # ----------------------------------------------------
-        # DISPLAY ANSWER (skip body if already live-streamed)
-        # ----------------------------------------------------
-
-        show_tutor(
-            answer,
-            already_streamed=getattr(ask_model, "did_stream_response", False),
-        )
-
-        # ----------------------------------------------------
-        # STORE CLEAN CONVERSATION
-        # ----------------------------------------------------
-
-        conversation.append({
-            "role": "assistant",
-            "content": answer
-        })
-
-        # Do not allow conversation context to grow forever.
-        if len(conversation) > (
-            MAX_CONVERSATION_MESSAGES
-        ):
-
-            conversation = conversation[
-                -MAX_CONVERSATION_MESSAGES:
-            ]
-
-        save_state(state)
+def _print_cli_stats(stats: dict) -> None:
+    if not stats:
+        return
+    bits = []
+    if stats.get("eval_count") is not None:
+        bits.append(f"out={stats['eval_count']}")
+    if stats.get("prompt_eval_count") is not None:
+        bits.append(f"in={stats['prompt_eval_count']}")
+    if stats.get("total_s") is not None:
+        bits.append(f"{stats['total_s']}s")
+    if stats.get("ttft_s") is not None:
+        bits.append(f"ttft={stats['ttft_s']}")
+    if bits:
+        print(c("  [" + " · ".join(str(b) for b in bits) + "]", YELLOW))
 
 
 # ============================================================

@@ -10,6 +10,16 @@ Python owns the persistent learner model; a local LLM (Ollama) decides how to sp
 
 ---
 
+## Gebruikershandleiding (alleen web)
+
+Voor vrienden / leerlingen die **alleen de browser** gebruiken:
+
+→ **[docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)** (Nederlands, geen CLI/Python)
+
+Beheerder: accounts aanmaken met `python tools/create_user.py <naam>`, public link via Tailscale Funnel — zie [docs/PUBLIC_ACCESS.md](docs/PUBLIC_ACCESS.md).
+
+---
+
 ## What it does
 
 1. Discovers what you want to learn (natural language or `/new`)
@@ -108,15 +118,23 @@ After a **correct** verdict, policy advances toward application/transfer instead
 
 | Path | Role |
 |------|------|
-| `tutor.py` | CLI, model I/O, prompt build, policy, state helpers |
-| `core.py` | Shared turn handler (CLI + web): commands, routing |
+| `core.py` | Shared turn handler (CLI + web): commands, routing, lobby |
+| `tutor.py` | State, prompt build, CLI entry |
+| `llm.py` | Ollama client: stream, JSON retry, metrics |
+| `policy.py` | Deterministic next-activity rules |
+| `intent_phrases.py` | NL intent phrases (repeat / skip / subjects) |
+| `auth.py` | Multi-user: PBKDF2 passwords, session cookies |
 | `system_prompt.md` | Pedagogical system prompt |
-| `learner_state.json` | Persistent learner model (not committed) |
-| `gateway/app.py` | FastAPI: `/api/v1/turn`, SSE stream, threads |
-| `web/index.html` | Mobile-friendly UI |
-| `evals/` | Policy + LLM regression cases |
+| `gateway/app.py` | FastAPI: auth, SSE, per-subject threads, lobby |
+| `web/index.html` | Mobile-friendly UI (login, lobby, streaming) |
+| `tools/create_user.py` | Create / reset user accounts |
+| `data/users/<id>/` | Per-user state (not committed) |
+| `evals/` | Policy + multi-turn regression cases |
+| `docs/HOW_TO_USE.md` | End-user guide (web only) |
+| `docs/PUBLIC_ACCESS.md` | HTTPS / Funnel for friends outside Tailscale |
+| `docs/VISION.md` | Product vision & pedagogy |
 | `ROADMAP.md` | Research notes, prior art, decision log |
-| `VISION.md` | Full product vision and journey from v0 → now |
+| `docs/VISION.md` | Full product vision and journey from v0 → now |
 
 ### Interfaces
 
@@ -179,5 +197,14 @@ MIT (see `LICENSE` if present). Prior-art references and their licenses are list
 
 ## Status
 
-**v0.4.x** — usable CLI + web, policy engine, tree, misconceptions, FSRS, evals, streaming UI, per-subject threads.  
-See `VISION.md` for the original goals and how the system evolved.
+**v0.4.2** — usable CLI + web, policy engine, tree, misconceptions, FSRS, evals, streaming UI, per-subject threads.  
+See `docs/VISION.md` for the original goals and how the system evolved.
+
+
+## Multi-user & public access
+
+- **Auth:** username/password (`auth.py`), HTTP-only session cookie, per-user data under `data/users/<id>/`.
+- **No self-signup** — `python tools/create_user.py <user>`
+- **Tailscale:** private access on your network.
+- **Public friends:** [docs/PUBLIC_ACCESS.md](docs/PUBLIC_ACCESS.md) (Tailscale Funnel recommended).
+- Do **not** expose Ollama publicly.

@@ -1,0 +1,25 @@
+{
+  "id": "17_intent_phrases",
+  "description": "Centralized intent_phrases: repeat/skip/full-teach flags and subject-list detection (no LLM).",
+  "mode": "policy_only",
+  "setup": {
+    "active": true,
+    "subject_id": "demo_topic",
+    "subject_title": "Demo Topic",
+    "concept_id": "core_idea",
+    "scores": {
+      "knowledge": 0.4,
+      "retrieval": 0.4,
+      "application": 0.3,
+      "explanation": 0.3,
+      "transfer": 0.2
+    }
+  },
+  "asserts": [
+    { "type": "intent_repeat", "text": "dat hebben we al gedaan", "expect": true },
+    { "type": "intent_skip_resume", "text": "liever over iets anders", "expect": true },
+    { "type": "intent_full_teach", "text": "ik snap je vraag niet, leg uit", "expect": true },
+    { "type": "intent_list_subjects", "text": "welke onderwerpen heb ik?", "expect": true },
+    { "type": "intent_subject_topic", "text": "ik wil verder leren over agents", "expect_contains": "agents" }
+  ]
+}

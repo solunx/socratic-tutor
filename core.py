@@ -8,17 +8,41 @@ No terminal printing. State is mutated and returned; caller saves if needed.
 
 from __future__ import annotations
 
+import logging
+
 import copy
 from datetime import datetime
 from typing import Any
 
 import tutor as T
+import intent_phrases as IP
+
+logger = logging.getLogger(__name__)
+
+
+def _subject_last_activity(state: dict, sid: str, sub: dict) -> str:
+    """ISO timestamp of most recent practice on this subject (concepts or history)."""
+    best = str(sub.get("updated_at") or sub.get("created_at") or "")
+    for cpt in (sub.get("concepts") or {}).values():
+        if not isinstance(cpt, dict):
+            continue
+        for key in ("last_practiced", "last_review"):
+            t = str(cpt.get(key) or "")
+            if t > best:
+                best = t
+    for h in state.get("history") or []:
+        if isinstance(h, dict) and h.get("subject_id") == sid:
+            t = str(h.get("date") or "")
+            if t > best:
+                best = t
+    return best
 
 
 def subjects_payload(state: dict) -> list[dict]:
+    """Subjects for UI/API. Sorted: least-recently-active first (good for 'what to review')."""
     out = []
     subjects = state.get("subjects") or {}
-    for sid, sub in sorted(subjects.items(), key=lambda x: str(x[1].get("title", x[0])).lower()):
+    for sid, sub in subjects.items():
         if not isinstance(sub, dict):
             continue
         concepts = sub.get("concepts") or {}
@@ -29,6 +53,7 @@ def subjects_payload(state: dict) -> list[dict]:
             for m in cpt.get("misconceptions") or []:
                 if isinstance(m, dict) and m.get("status", "open") != "resolved":
                     n_open += 1
+        last_act = _subject_last_activity(state, sid, sub)
         item = {
             "id": sid,
             "title": sub.get("title", sid),
@@ -38,9 +63,44 @@ def subjects_payload(state: dict) -> list[dict]:
             "status": T.subject_status_line(state, sid),
             "parent_id": sub.get("parent_id"),
             "related": list(sub.get("related") or []),
+            "last_activity": last_act or None,
         }
         out.append(item)
+    # Oldest activity first (None last); then title
+    out.sort(key=lambda x: (x.get("last_activity") is None, x.get("last_activity") or "", (x.get("title") or "").lower()))
     return out
+
+
+def lobby_overview(state: dict) -> str:
+    """Plain-language meta overview for the lobby (no teaching)."""
+    T.rebuild_review_queue(state)
+    items = subjects_payload(state)
+    due = state.get("review_queue") or []
+    lines = [
+        "Dit is de lobby — navigatie, geen les.",
+        "Zeg bv. “ik wil verder met agents”, “welke onderwerpen?”, “/tree”, “/review”.",
+        "Of tik een onderwerp in ☰.",
+        "",
+    ]
+    if not items:
+        lines.append("Nog geen onderwerpen. Start met /new <kort onderwerp>.")
+        return "\n".join(lines)
+    lines.append(f"Onderwerpen ({len(items)}), minst recent eerst:")
+    for it in items:
+        la = it.get("last_activity") or "—"
+        if la and la not in ("—",) and "T" in str(la):
+            la = str(la).replace("T", " ")[:16]
+        bits = [it.get("title") or it["id"]]
+        if it.get("n_concepts"):
+            bits.append(f"{it['n_concepts']} concepten")
+        if it.get("open_mc"):
+            bits.append(f"{it['open_mc']} open MC")
+        bits.append(f"laatst: {la}")
+        lines.append(" · ".join(bits))
+    if due:
+        lines.append("")
+        lines.append(f"Due reviews: {len(due)}")
+    return "\n".join(lines)
 
 
 def resume_payload(state: dict, subject_id: str) -> dict:
@@ -111,7 +171,7 @@ def state_summary(state: dict) -> dict:
     }
 
 
-def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
+def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | None = None) -> dict | None:
     """Return a response dict for slash commands, or None if not a command."""
     low = cmd.lower().strip()
 
@@ -293,7 +353,7 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
             "role": "system",
             "content": "[session boundary — topic switch or reset]",
         })
-        T.save_state(state)
+        T.save_state(state, user_id=user_id)
         return {
             "ok": True,
             "agent": "tutor",
@@ -306,18 +366,43 @@ def _handle_command(state: dict, conversation: list, cmd: str) -> dict | None:
     return None
 
 
-def _quiet_switch(state: dict, conversation: list, subject_id: str) -> dict:
+def _quiet_switch(state: dict, conversation: list, subject_id: str, user_id: str | None = None) -> dict:
+    """Switch subject. conversation is the *old* thread list (web) or the only list (CLI).
+
+    Only a session-boundary marker is appended to the old conversation.
+    Resume banner + question are returned in the payload; the web gateway
+    places them on the *target* thread so topics do not leak into each other.
+    """
     active = state["active_session"]
     if active.get("active") and active.get("subject_id") != subject_id:
         T.close_session(state, active.get("resume_instruction"))
     T.start_session(state, subject_id, is_resume=True)
-    # Keep UI history; model still only sees last N messages.
     conversation.append({
         "role": "system",
         "content": "[session boundary — topic switch or reset]",
     })
+    # Remove trailing Hervat/resume that an older version may have left on this thread
+    while conversation:
+        last = conversation[-1]
+        if not isinstance(last, dict):
+            break
+        role = last.get("role")
+        content = str(last.get("content") or "")
+        if role == "system" and content.startswith("Hervat:"):
+            conversation.pop()
+            continue
+        if role == "assistant" and content and len(conversation) >= 2:
+            prev = conversation[-2]
+            if (
+                isinstance(prev, dict)
+                and prev.get("role") == "system"
+                and str(prev.get("content") or "").startswith("Hervat:")
+            ):
+                conversation.pop()
+                continue
+        break
+
     banner = resume_payload(state, subject_id)
-    # Store resume question for anti-repeat
     resume_q = banner.get("resume_question")
     if resume_q:
         active = state["active_session"]
@@ -327,15 +412,17 @@ def _quiet_switch(state: dict, conversation: list, subject_id: str) -> dict:
         if not recent or recent[-1] != active["last_tutor_question"]:
             recent.append(active["last_tutor_question"])
         active["recent_questions"] = recent[-5:]
-    T.save_state(state)
+    T.save_state(state, user_id=user_id)
     return {
         "ok": True,
         "agent": "tutor",
         "kind": "resume",
         "response": resume_q or "",
         "resume": banner,
+        "subject_id": subject_id,
         "subjects": subjects_payload(state),
         "summary": state_summary(state),
+        "switched_from_thread": True,
     }
 
 
@@ -347,12 +434,18 @@ def handle_turn(
     agent: str = "tutor",
     save: bool = True,
     stream: bool = False,
+    on_response_delta=None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Process one user message. Returns a JSON-serializable result.
 
     kind: help | subjects | state | reviews | reset | new_subject |
           resume | clarify | message | error
+
+    stream: pass through to the LLM client (CLI live print / web SSE).
+    on_response_delta: optional callback(partial, delta) for token streaming
+    without mutating global T.STREAM or T.ask_model.
     """
     if agent != "tutor":
         return {
@@ -363,7 +456,7 @@ def handle_turn(
         }
 
     if state is None:
-        state = T.load_state()
+        state = T.load_state(user_id=user_id)
     if conversation is None:
         conversation = []
 
@@ -377,11 +470,49 @@ def handle_turn(
         }
 
     # Slash commands (no LLM)
-    cmd_result = _handle_command(state, conversation, text)
+    cmd_result = _handle_command(state, conversation, text, user_id=user_id)
     if cmd_result is not None:
         if save:
-            T.save_state(state)
+            T.save_state(state, user_id=user_id)
         return cmd_result
+
+    # ---- Python-first subject switch (do not rely on LLM routing) ----
+    # "… maar ik wil verder leren over agents" must leave the current subject
+    # without treating the sentence as a learning answer.
+    active = state.get("active_session") or {}
+    topic = T.detect_subject_intent(text)
+    if topic:
+        matches = T.find_matching_subjects(state, topic, limit=3)
+        best_id = None
+        if matches and matches[0][1] >= 50:
+            best_id = matches[0][0]
+        else:
+            rid = T.resolve_subject_id(state, topic, title=topic)
+            if rid and rid in state.get("subjects", {}):
+                best_id = rid
+        cur = active.get("subject_id") if active.get("active") else None
+        if best_id and best_id != cur:
+            # Do NOT append the switch utterance to the subject teaching thread
+            return _quiet_switch(state, conversation, best_id, user_id=user_id)
+        if best_id and best_id == cur:
+            # Already on that subject — soft resume of open question, no LLM
+            return _quiet_switch(state, conversation, best_id, user_id=user_id)
+
+
+    # ---- Lobby / meta (no active teaching subject) ----
+    # Overview questions never need the teaching model path.
+    if IP.is_list_subjects_query(text) or text.strip().lower() in (
+        "lobby", "/lobby", "overzicht", "help me kiezen", "wat nu",
+    ):
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "lobby",
+            "response": lobby_overview(state),
+            "subjects": subjects_payload(state),
+            "summary": state_summary(state),
+            "thread_id": "_lobby",
+        }
 
     # Pending goal collection (after /new)
     active = state.get("active_session") or {}
@@ -391,7 +522,7 @@ def handle_turn(
             state["subjects"][sid]["goal"] = text[:300]
             state["subjects"][sid]["updated_at"] = datetime.now().isoformat()
         active["pending_goal"] = False
-        T.save_state(state) if save else None
+        T.save_state(state, user_id=user_id) if save else None
         # Fall through to first teaching turn with goal stored
         # Re-inject as learning intent
         text = f"Ik wil leren over dit onderwerp. Leerdoel: {text}"
@@ -404,73 +535,47 @@ def handle_turn(
         ) + 1
         state["active_session"]["last_activity"] = datetime.now().isoformat()
         low = text.lower()
-        if any(
-            phrase in low
-            for phrase in (
-                "dat hebben we",
-                "hebben we al",
-                "al gedaan",
-                "al uitgerekend",
-                "al toegelicht",
-                "al uitgelegd",
-                "daarnet gedaan",
-                "net gedaan",
-                "duizend keer",
-                "al 10 keer",
-                "al gezegd",
-                "geen correctie nodig",
-                "omg dat heb ik",
-            )
-        ):
+        if IP.matches_any(low, IP.REPEAT_ADVANCE_PHRASES):
             state["active_session"]["must_advance"] = True
             state["active_session"]["repeat_streak"] = int(
                 state["active_session"].get("repeat_streak") or 0
             ) + 1
 
-        if any(
-            phrase in low
-            for phrase in (
-                "niet belangrijk",
-                "geen idee",
-                "wil geen",
-                "wil niet",
-                "ik wil begrijpen",
-                "ik wil meer",
-                "liever over",
-                "overstappen",
-                "iets anders",
-            )
-        ):
+        if IP.matches_any(low, IP.SKIP_RESUME_PHRASES):
             state["active_session"]["just_resumed"] = False
             state["active_session"]["resume_instruction"] = None
             state["active_session"]["must_advance"] = True
 
+        if IP.matches_any(low, IP.FULL_TEACH_PHRASES):
+            state["active_session"]["force_full_teach"] = True
+            state["active_session"]["stuck_signal"] = True
+
     policy = T.suggest_next_activity(state)
-    # Force non-streaming for API reliability (gateway can stream later)
-    old_stream = T.STREAM
-    T.STREAM = bool(stream)
     try:
         messages = T.build_messages(base_prompt, state, conversation, policy=policy)
-        raw, result = T.ask_model_with_json_retry(messages)
+        raw, result = T.ask_model_with_json_retry(
+            messages,
+            stream=bool(stream),
+            on_response_delta=on_response_delta,
+        )
     except Exception as e:
         conversation.pop()
-        T.STREAM = old_stream
         return {
             "ok": False,
             "agent": "tutor",
             "kind": "error",
             "response": f"Model error: {e}",
         }
-    finally:
-        T.STREAM = old_stream
 
     stats = dict(getattr(T.ask_model, "last_stats", None) or {})
+    streamed_response = bool(getattr(T.ask_model, "did_stream_response", False)) or bool(stats.get("streamed"))
+    stats["streamed"] = streamed_response
 
     if not result:
         answer = (raw or "").strip() or "I could not produce a valid tutor reply."
         conversation.append({"role": "assistant", "content": answer})
         if save:
-            T.save_state(state)
+            T.save_state(state, user_id=user_id)
         return {
             "ok": False,
             "agent": "tutor",
@@ -497,7 +602,7 @@ def handle_turn(
         )
         conversation.append({"role": "assistant", "content": summary})
         if save:
-            T.save_state(state)
+            T.save_state(state, user_id=user_id)
         return {
             "ok": True,
             "agent": "tutor",
@@ -514,7 +619,7 @@ def handle_turn(
         conversation.append({"role": "assistant", "content": answer})
         T.update_session_memory(state, session_info if isinstance(session_info, dict) else {}, answer)
         if save:
-            T.save_state(state)
+            T.save_state(state, user_id=user_id)
         return {
             "ok": True,
             "agent": "tutor",
@@ -540,7 +645,7 @@ def handle_turn(
                 "content": f"Onderwerp \"{raw_id}\" niet gevonden.",
             })
             if save:
-                T.save_state(state)
+                T.save_state(state, user_id=user_id)
             return {
                 "ok": True,
                 "agent": "tutor",
@@ -550,13 +655,13 @@ def handle_turn(
                 "stats": stats,
             }
         # Drop the user message from teaching conversation after switch
-        return _quiet_switch(state, conversation, best_id)
+        return _quiet_switch(state, conversation, best_id, user_id=user_id)
 
     if action == "new_subject":
         title = routing.get("proposed_title") or routing.get("subject")
         if not title or len(str(title).strip()) > 60:
             if save:
-                T.save_state(state)
+                T.save_state(state, user_id=user_id)
             return {
                 "ok": False,
                 "agent": "tutor",
@@ -582,7 +687,7 @@ def handle_turn(
             "content": "[session boundary — topic switch or reset]",
         })
         if save:
-            T.save_state(state)
+            T.save_state(state, user_id=user_id)
         return {
             "ok": True,
             "agent": "tutor",
@@ -605,7 +710,7 @@ def handle_turn(
     try:
         T.apply_assessment(state, assessment)
     except Exception:
-        pass
+        logger.exception("apply_assessment failed; learner state may not have been updated this turn")
 
     if isinstance(session_info, dict):
         ri = session_info.get("resume_instruction")
@@ -630,7 +735,7 @@ def handle_turn(
         del conversation[: len(conversation) - T.MAX_CONVERSATION_MESSAGES]
 
     if save:
-        T.save_state(state)
+        T.save_state(state, user_id=user_id)
 
     return {
         "ok": True,
@@ -645,6 +750,7 @@ def handle_turn(
             "concept_id": policy.get("concept_id"),
         },
         "stats": stats,
+        "streamed_response": streamed_response,
         "summary": state_summary(state),
     }
 

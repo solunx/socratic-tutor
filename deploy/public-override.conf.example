@@ -1,0 +1,8 @@
+[Service]
+# Enable when exposing via Tailscale Funnel / Cloudflare Tunnel / Caddy HTTPS
+Environment=TUTOR_PUBLIC=1
+Environment=TUTOR_COOKIE_SECURE=1
+Environment=TUTOR_TRUST_PROXY=1
+Environment=TUTOR_SESSION_DAYS=14
+# Prefer localhost when a reverse proxy terminates TLS:
+# ExecStart=... --host 127.0.0.1 --port 8790

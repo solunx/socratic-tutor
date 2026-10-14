@@ -1,0 +1,38 @@
+{
+  "id": "13_verdict_partial_advances",
+  "description": "After partial verdict with same_activity_streak>=1 on EXPLANATION, advance to APPLICATION.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "biology",
+    "subject_title": "Biology",
+    "goal": "cell membrane",
+    "concept_id": "osmosis",
+    "concept_title": "Osmosis",
+    "scores": {
+      "knowledge": 0.4,
+      "retrieval": 0.3,
+      "application": 0.15,
+      "explanation": 0.35,
+      "transfer": 0.0
+    },
+    "current_activity": "EXPLANATION",
+    "prev_activity": "EXPLANATION",
+    "last_verdict": "partial",
+    "same_activity_streak": 2,
+    "just_resumed": false
+  },
+  "policy_expect": {
+    "activity": "APPLICATION",
+    "force": true
+  },
+  "asserts": [
+    {
+      "type": "policy_activity",
+      "value": "APPLICATION"
+    },
+    {
+      "type": "policy_force",
+      "value": true
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "id": "14_verdict_correct_to_transfer",
+  "description": "Correct verdict after EXPLANATION with application>=0.45 and weak transfer → TRANSFER.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "cs",
+    "subject_title": "Computer Science",
+    "goal": "hash tables",
+    "concept_id": "collision",
+    "concept_title": "Collisions",
+    "scores": {
+      "knowledge": 0.6,
+      "retrieval": 0.5,
+      "application": 0.55,
+      "explanation": 0.5,
+      "transfer": 0.2
+    },
+    "current_activity": "EXPLANATION",
+    "prev_activity": "EXPLANATION",
+    "last_verdict": "correct",
+    "same_activity_streak": 1,
+    "just_resumed": false
+  },
+  "policy_expect": {
+    "activity": "TRANSFER",
+    "force": true
+  },
+  "asserts": [
+    {
+      "type": "policy_activity",
+      "value": "TRANSFER"
+    },
+    {
+      "type": "policy_force",
+      "value": true
+    }
+  ]
+}
