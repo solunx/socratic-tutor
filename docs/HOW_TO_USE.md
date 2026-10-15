@@ -53,7 +53,9 @@ De tutor is **geen Google**. Het doel is dat **jij** beter leert redeneren.
 ## Privacy
 
 - Alleen jij (en de beheerder op de server) hebt toegang tot jouw account.
+- Jouw onderwerpen en chats staan **niet** bij andere gebruikers; elk account heeft eigen voortgang.
 - Deel je wachtwoord niet. Bij vergeten wachtwoord: vraag de beheerder om een reset.
+- Gebruik **Uit** (uitloggen) als je op een gedeeld apparaat werkt, vóór iemand anders inlogt.
 
 ## Problemen
 

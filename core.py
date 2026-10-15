@@ -171,6 +171,23 @@ def state_summary(state: dict) -> dict:
     }
 
 
+
+def _looks_like_navigation(text: str) -> bool:
+    """True if the message is mainly 'switch/continue topic', not a content answer.
+
+    Long replies (diagnostic answers, explanations) often contain words that
+    also match subject-intent regexes; those must stay on the teaching thread.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Substantial answers are never pure navigation
+    if len(t) > 100:
+        return False
+    if t.count(" ") >= 18:  # ~18+ words
+        return False
+    return True
+
 def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | None = None) -> dict | None:
     """Return a response dict for slash commands, or None if not a command."""
     low = cmd.lower().strip()
@@ -207,6 +224,7 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
         }
 
     if low in ("/tree", "/concepttree", "/concepts"):
+        # include learner id so multi-tab cookie mix is obvious
         try:
             tree_text = T.format_concept_tree(state)
         except Exception:
@@ -220,18 +238,22 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
                 else:
                     buf.write("(tree unavailable)")
             tree_text = buf.getvalue()
+        lid = (state.get("learner") or {}).get("id") or user_id or "?"
         return {
             "ok": True,
             "agent": "tutor",
             "kind": "tree",
-            "response": tree_text or "(geen concepten)",
+            "response": f"User: {lid}\n" + (tree_text or "(geen concepten)"),
             "subjects": subjects_payload(state),
+            "user_id": lid,
         }
 
     if low == "/state":
         summary = state_summary(state)
         active = state.get("active_session") or {}
+        lid = (state.get("learner") or {}).get("id") or user_id or "?"
         lines = [
+            f"User: {lid}",
             f"Active: {bool(active.get('active'))}"
             + (
                 f" · {active.get('subject_id')} / {active.get('current_concept_id') or '—'}"
@@ -248,6 +270,8 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
             "kind": "state",
             "response": "\n".join(lines),
             "summary": summary,
+            "subjects": subjects_payload(state),
+            "user_id": lid,
         }
 
     if low in ("/state full", "/statefull", "/json"):
@@ -279,7 +303,7 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
     if low in ("/quit", "/exit", "/stop"):
         active = state.get("active_session") or {}
         if active.get("active"):
-            T.close_session(state, active.get("resume_instruction"))
+            T.close_session(state, active.get("resume_instruction"), user_id=user_id)
         return {
             "ok": True,
             "agent": "tutor",
@@ -335,8 +359,8 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
         }
 
     if low.startswith("/new "):
-        title = cmd[5:].strip()
-        if not title or len(title) > 60 or title.count(" ") > 5:
+        title = T.short_subject_title(cmd[5:].strip())
+        if not title or title == "general":
             return {
                 "ok": False,
                 "agent": "tutor",
@@ -345,9 +369,9 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
             }
         active = state["active_session"]
         if active.get("active"):
-            T.close_session(state, active.get("resume_instruction"))
+            T.close_session(state, active.get("resume_instruction"), user_id=user_id)
         subject_id = T.ensure_subject(state, title, title)
-        T.start_session(state, subject_id, pending_goal=True)
+        T.start_session(state, subject_id, pending_goal=True, user_id=user_id)
         # Keep UI history; model still only sees last N messages.
         conversation.append({
             "role": "system",
@@ -361,6 +385,8 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
             "response": f"New subject: {title}. What do you want to achieve with this topic?",
             "subject_id": subject_id,
             "subjects": subjects_payload(state),
+            "routing": {"action": "new_subject", "subject": subject_id},
+            "switched_from_thread": True,
         }
 
     return None
@@ -375,8 +401,8 @@ def _quiet_switch(state: dict, conversation: list, subject_id: str, user_id: str
     """
     active = state["active_session"]
     if active.get("active") and active.get("subject_id") != subject_id:
-        T.close_session(state, active.get("resume_instruction"))
-    T.start_session(state, subject_id, is_resume=True)
+        T.close_session(state, active.get("resume_instruction"), user_id=user_id)
+    T.start_session(state, subject_id, is_resume=True, user_id=user_id)
     conversation.append({
         "role": "system",
         "content": "[session boundary — topic switch or reset]",
@@ -477,11 +503,12 @@ def handle_turn(
         return cmd_result
 
     # ---- Python-first subject switch (do not rely on LLM routing) ----
-    # "… maar ik wil verder leren over agents" must leave the current subject
-    # without treating the sentence as a learning answer.
+    # Only short navigational utterances ("ik wil verder met agents").
+    # Long answers that merely mention a topic must NOT become switches —
+    # otherwise diagnostic/teaching replies are moved to the lobby.
     active = state.get("active_session") or {}
     topic = T.detect_subject_intent(text)
-    if topic:
+    if topic and _looks_like_navigation(text):
         matches = T.find_matching_subjects(state, topic, limit=3)
         best_id = None
         if matches and matches[0][1] >= 50:
@@ -492,11 +519,9 @@ def handle_turn(
                 best_id = rid
         cur = active.get("subject_id") if active.get("active") else None
         if best_id and best_id != cur:
-            # Do NOT append the switch utterance to the subject teaching thread
+            # Leave current subject; do not treat as a learning answer
             return _quiet_switch(state, conversation, best_id, user_id=user_id)
-        if best_id and best_id == cur:
-            # Already on that subject — soft resume of open question, no LLM
-            return _quiet_switch(state, conversation, best_id, user_id=user_id)
+        # best_id == cur → already here: fall through and teach / assess
 
 
     # ---- Lobby / meta (no active teaching subject) ----
@@ -522,9 +547,11 @@ def handle_turn(
             state["subjects"][sid]["goal"] = text[:300]
             state["subjects"][sid]["updated_at"] = datetime.now().isoformat()
         active["pending_goal"] = False
+        # Start prior-knowledge intake for this subject (if not already done)
+        if sid and T.subject_needs_diagnostic(state, sid):
+            T.begin_subject_diagnostic(state, sid)
         T.save_state(state, user_id=user_id) if save else None
-        # Fall through to first teaching turn with goal stored
-        # Re-inject as learning intent
+        # Fall through to first turn: diagnostic (policy) or teaching
         text = f"Ik wil leren over dit onderwerp. Leerdoel: {text}"
 
     base_prompt = T.load_system_prompt()
@@ -547,8 +574,13 @@ def handle_turn(
             state["active_session"]["must_advance"] = True
 
         if IP.matches_any(low, IP.FULL_TEACH_PHRASES):
+            # Explicit "leg uit" / "stap voor stap" only
             state["active_session"]["force_full_teach"] = True
             state["active_session"]["stuck_signal"] = True
+        elif IP.matches_any(low, getattr(IP, "STUCK_PHRASES", ())):
+            # "geen idee" → nudge harder, do NOT dump the answer yet
+            state["active_session"]["stuck_signal"] = True
+            state["active_session"]["force_scaffold"] = True
 
     policy = T.suggest_next_activity(state)
     try:
@@ -567,8 +599,8 @@ def handle_turn(
             "response": f"Model error: {e}",
         }
 
-    stats = dict(getattr(T.ask_model, "last_stats", None) or {})
-    streamed_response = bool(getattr(T.ask_model, "did_stream_response", False)) or bool(stats.get("streamed"))
+    stats = dict(llm_stats or {})
+    streamed_response = bool(stats.get("streamed"))
     stats["streamed"] = streamed_response
 
     if not result:
@@ -669,9 +701,9 @@ def handle_turn(
                 "response": "Could not create subject (title missing or too long).",
                 "stats": stats,
             }
-        title = str(title).strip()
+        title = T.short_subject_title(str(title).strip())
         if active.get("active"):
-            T.close_session(state, active.get("resume_instruction"))
+            T.close_session(state, active.get("resume_instruction"), user_id=user_id)
         tax = routing.get("taxonomy") if isinstance(routing.get("taxonomy"), dict) else {}
         parent_id = tax.get("parent_id") or routing.get("parent_id")
         if parent_id:
@@ -680,7 +712,7 @@ def handle_turn(
                 parent_id = None
         subject_id = T.ensure_subject(state, title, title, parent_id=parent_id)
         T.apply_taxonomy_proposals(state, routing, focus_subject_id=subject_id)
-        T.start_session(state, subject_id, pending_goal=True)
+        T.start_session(state, subject_id, pending_goal=True, user_id=user_id)
         # Keep UI history; model still only sees last N messages.
         conversation.append({
             "role": "system",
@@ -697,6 +729,8 @@ def handle_turn(
             "subjects": subjects_payload(state),
             "stats": stats,
             "summary": state_summary(state),
+            "routing": {"action": "new_subject", "subject": subject_id},
+            "switched_from_thread": True,
         }
 
     # ---- continue: assessment ----
@@ -705,7 +739,11 @@ def handle_turn(
         if isinstance(assessment, dict):
             sid = assessment.get("subject")
         if sid and T.is_valid_id(sid):
-            T.start_session(state, T.ensure_subject(state, sid, sid))
+            T.start_session(
+                state,
+                T.ensure_subject(state, sid, sid),
+                user_id=user_id,
+            )
 
     try:
         T.apply_assessment(state, assessment)
@@ -755,13 +793,14 @@ def handle_turn(
     }
 
 
-def bootstrap() -> dict:
-    """Load state and return initial payload for the UI."""
-    state = T.load_state()
+def bootstrap(user_id: str | None = None) -> dict:
+    """Load state for user_id and return initial payload for the UI."""
+    state = T.load_state(user_id=user_id)
     return {
         "ok": True,
         "agent": "tutor",
         "model": T.MODEL_NAME,
         "summary": state_summary(state),
         "subjects": subjects_payload(state),
+        "user_id": user_id,
     }

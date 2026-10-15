@@ -5,6 +5,7 @@ import json
 import fcntl
 import math
 import re
+import threading
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -19,22 +20,62 @@ BASE_DIR = Path(__file__).resolve().parent
 SYSTEM_PROMPT_FILE = BASE_DIR / "system_prompt.md"
 STATE_FILE = BASE_DIR / "learner_state.json"  # legacy default path
 DEFAULT_USER_ID = "george"
+# When True (gateway sets this), save_state/load_state never fall back to
+# DEFAULT_USER_ID silently — prevents writing user A's state into george's file.
+STRICT_USERS = False
+
+# Per-user reentrant lock: load → LLM turn → save (CLI + web, same user)
+_USER_LOCKS: dict[str, threading.RLock] = {}
+_USER_LOCKS_MU = threading.Lock()
+
+
+def acquire_user_lock(user_id: str | None = None) -> threading.RLock:
+    """Return an RLock for this user (create on first use)."""
+    uid = (user_id or DEFAULT_USER_ID).strip().lower() or DEFAULT_USER_ID
+    with _USER_LOCKS_MU:
+        lock = _USER_LOCKS.get(uid)
+        if lock is None:
+            lock = threading.RLock()
+            _USER_LOCKS[uid] = lock
+        return lock
 
 
 def resolve_state_path(user_id: str | None = None) -> Path:
-    """Per-user state file under data/users/<id>/, with legacy root fallback."""
+    """Always use data/users/<id>/learner_state.json — never share one file across users.
+
+    Legacy root learner_state.json is only *copied once* into the user dir when:
+    - per-user file is missing, AND
+    - legacy exists, AND
+    - legacy learner.id matches this user (or is empty and user is DEFAULT_USER_ID).
+    After that every load/save is per-user only.
+    """
     uid = (user_id or DEFAULT_USER_ID).strip().lower() or DEFAULT_USER_ID
     try:
         import auth
         path = auth.state_path(uid)
-        if path.exists():
-            return path
-        # Legacy single-file layout (pre multi-user)
-        if uid == DEFAULT_USER_ID and STATE_FILE.exists():
-            return STATE_FILE
-        return path
     except Exception:
-        return STATE_FILE
+        path = BASE_DIR / "data" / "users" / uid / "learner_state.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if path.exists():
+        return path
+
+    # One-time adopt legacy root file if it belongs to this user
+    if STATE_FILE.exists():
+        try:
+            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            lid = str((raw.get("learner") or {}).get("id") or "").strip().lower()
+            belongs = (lid == uid) or (not lid and uid == DEFAULT_USER_ID)
+            # Never adopt another user's state (e.g. vriend1 → george)
+            if belongs and not path.exists():
+                import shutil
+                shutil.copy2(STATE_FILE, path)
+        except Exception:
+            pass
+    return path
 
 CATALOG_FILE = BASE_DIR / "misconception_catalog.json"
 METRICS_DIR = BASE_DIR / "metrics"
@@ -337,11 +378,41 @@ def _state_lock_path(path: Path | None = None):
     return Path(str(p) + ".lock")
 
 
+def _resolve_uid(state, user_id: str | None = None) -> str:
+    """Pick which user's file to read/write.
+
+    Priority:
+      1. explicit user_id argument
+      2. state['learner']['id']  (the blob knows who it belongs to)
+      3. DEFAULT_USER_ID only if STRICT_USERS is False (CLI convenience)
+
+    Never map a missing user_id to a *real other person* when the state
+    already carries learner.id — that was the multi-user contamination bug
+    (start_session/close_session called save_state(state) without user_id,
+    which used to write vriend1's blob into data/users/george/).
+    """
+    if user_id:
+        return str(user_id).strip().lower() or DEFAULT_USER_ID
+    try:
+        lid = str((state.get("learner") or {}).get("id") or "").strip().lower()
+    except Exception:
+        lid = ""
+    if lid:
+        return lid
+    if STRICT_USERS:
+        raise RuntimeError(
+            "save_state/load without user_id and state has no learner.id "
+            "(STRICT_USERS=True — refusing DEFAULT_USER_ID fallback)"
+        )
+    return DEFAULT_USER_ID
+
+
 def save_state(state, user_id: str | None = None):
     """Persist learner state with an exclusive file lock (CLI + web safe).
 
     user_id selects data/users/<id>/learner_state.json (multi-user web).
-    CLI can omit user_id (uses DEFAULT_USER_ID / legacy path).
+    If omitted, uses state['learner']['id'] (never silently DEFAULT_USER_ID
+    when the blob already belongs to someone else).
     """
     try:
         hygiene_misconceptions(state)
@@ -357,7 +428,21 @@ def save_state(state, user_id: str | None = None):
         pass
     prune_learner_state(state)
 
-    path = resolve_state_path(user_id)
+    uid = _resolve_uid(state, user_id)
+    path = resolve_state_path(uid)
+    try:
+        lid = str((state.get("learner") or {}).get("id") or "").strip().lower()
+    except Exception:
+        lid = ""
+    if lid and lid != uid:
+        # Never write user A's state blob into user B's file
+        raise RuntimeError(
+            f"CROSS-USER SAVE BLOCKED: state.learner.id={lid!r} but path user={uid!r} ({path})"
+        )
+    try:
+        state.setdefault("learner", {})["id"] = uid
+    except Exception:
+        pass
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -552,12 +637,35 @@ def normalize_taxonomy_fields(state):
                 concept["parent_concept_id"] = None
 
 
+def _migrate_diagnostic_flags(state: dict) -> None:
+    """Mark subjects that already have concepts as diagnostic-done (no re-intake)."""
+    for _sid, _sub in (state.get("subjects") or {}).items():
+        if not isinstance(_sub, dict):
+            continue
+        d = _sub.get("diagnostic")
+        if isinstance(d, dict) and d.get("status") == "done":
+            continue
+        concepts = _sub.get("concepts") or {}
+        if concepts:
+            _sub["diagnostic"] = {
+                "status": "done",
+                "turns": int((d or {}).get("turns") or 0) if isinstance(d, dict) else 0,
+                "max_turns": 3,
+                "level_estimate": (
+                    (d or {}).get("level_estimate") if isinstance(d, dict) else None
+                ) or "emerging",
+                "notes": (
+                    ((d or {}).get("notes") if isinstance(d, dict) else None)
+                    or "migrated: existing subject"
+                )[:400],
+            }
+
+
 def load_state(user_id: str | None = None):
     """Load learner state for user_id (multi-user) or default/legacy path."""
     path = resolve_state_path(user_id)
     if not path.exists():
         state = default_state()
-        # stamp learner id
         try:
             state.setdefault("learner", {})["id"] = (user_id or DEFAULT_USER_ID)
         except Exception:
@@ -567,29 +675,88 @@ def load_state(user_id: str | None = None):
 
     try:
         with open(path, "r", encoding="utf-8") as f:
-            old = json.load(f)
+            raw = json.load(f)
     except Exception:
-        backup = path.with_suffix(path.suffix + f".bak-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+        backup = path.with_suffix(
+            path.suffix + f".bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        )
         try:
             path.rename(backup)
         except Exception:
             pass
         state = default_state()
+        try:
+            state.setdefault("learner", {})["id"] = (user_id or DEFAULT_USER_ID)
+        except Exception:
+            pass
         save_state(state, user_id=user_id)
         return state
 
-    if isinstance(old, dict) and int(old.get("version") or 0) >= 2:
-        state = old
-        try:
-            if user_id:
-                state.setdefault("learner", {})["id"] = user_id
-        except Exception:
-            pass
-        normalize_taxonomy_fields(state)
-        return state
+    if isinstance(raw, dict) and int(raw.get("version") or 0) >= 2:
+        state = raw
+    else:
+        state = migrate_state(raw)
 
-    state = migrate_state(old)
-    save_state(state, user_id=user_id)
+    # HARD GUARD: never treat another user's file as this user.
+    # (Silent overwrite of learner.id previously masked cross-user contamination.)
+    uid = (user_id or DEFAULT_USER_ID).strip().lower() or DEFAULT_USER_ID
+    try:
+        lid = str((state.get("learner") or {}).get("id") or "").strip().lower()
+    except Exception:
+        lid = ""
+    if lid and lid != uid:
+        # Quarantine mismatched file so we stop serving wrong data
+        bad = path.with_suffix(
+            path.suffix + f".MISMATCH-{lid}-as-{uid}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        )
+        try:
+            path.rename(bad)
+        except Exception:
+            try:
+                import shutil
+                shutil.copy2(path, bad)
+            except Exception:
+                pass
+        # Prefer known-good backup: must match learner.id, pick largest subject count
+        restored = None
+        best_score = -1
+        best_bak = None
+        best_cand = None
+        for bak in path.parent.glob("learner_state.json.bak*"):
+            try:
+                cand = json.loads(bak.read_text(encoding="utf-8"))
+                cid = str((cand.get("learner") or {}).get("id") or "").strip().lower()
+                if cid and cid != uid:
+                    continue  # never restore another user's state
+                nsub = len(cand.get("subjects") or {})
+                score = nsub
+                if "ai_agents" in (cand.get("subjects") or {}) and uid == "george":
+                    score += 100
+                if score > best_score:
+                    best_score = score
+                    best_bak = bak
+                    best_cand = cand
+            except Exception:
+                continue
+        if best_cand is not None and best_bak is not None:
+            import shutil
+            shutil.copy2(best_bak, path)
+            restored = best_cand
+            restored.setdefault("learner", {})["id"] = uid
+        if restored is None:
+            state = default_state()
+            state.setdefault("learner", {})["id"] = uid
+            save_state(state, user_id=uid)
+            return state
+        state = restored
+        # fall through to normalize
+
+    try:
+        state.setdefault("learner", {})["id"] = uid
+    except Exception:
+        pass
+    normalize_taxonomy_fields(state)
+    _migrate_diagnostic_flags(state)
     return state
 
 
@@ -698,11 +865,16 @@ def ensure_subject(state, subject_id, title=None, parent_id=None):
     if subject_id not in state["subjects"]:
         clean_title = title
         if clean_title:
-            clean_title = str(clean_title).strip()
-            if len(clean_title) > 60 or clean_title.count(" ") > 6:
+            clean_title = short_subject_title(str(clean_title).strip())
+            if clean_title == "general" and subject_id:
                 clean_title = subject_id.replace("_", " ").title()
         else:
             clean_title = subject_id.replace("_", " ").title()
+        # Prefer short id derived from title when the proposed id is a long sentence
+        if subject_id.count("_") >= 5 or len(subject_id) > 40:
+            better = normalize_id(clean_title)
+            if better and better not in state["subjects"]:
+                subject_id = better
 
         state["subjects"][subject_id] = {
             "title": clean_title,
@@ -876,6 +1048,65 @@ def clean_topic_phrase(topic):
     # Remove leading "even" / "graag"
     topic = re.sub(r"^(?:even\s+|graag\s+)+", "", topic, flags=re.IGNORECASE)
     return topic.strip(" .?!")
+
+
+
+def short_subject_title(raw: str | None) -> str:
+    """Turn long NL ('ik wil leren over efficient vergaderen') into a short title.
+
+    Used for subject title + id so the tree does not grow sentence-ids.
+    """
+    if not raw:
+        return "general"
+    t = str(raw).strip()
+    # Prefer content after "leren over" / "about" (handles long wrappers)
+    m = re.search(
+        r"(?:leren\s+over|learn\s+about|about)\s+(.+)$",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        t = m.group(1).strip()
+    else:
+        t = re.sub(
+            r"^(?:ik\s+wil\s+)?(?:graag\s+)?(?:even\s+)?"
+            r"(?:leren\s+)?(?:over|van|met)\s+",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+        t = re.sub(
+            r"^(?:i\s+want\s+to\s+)?(?:learn\s+)?(?:about|with)\s+",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+    t = re.sub(
+        r"^(?:nieuw\s+onderwerp\s*:?\s*|new\s+subject\s*:?\s*|hoe\s+)",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = clean_topic_phrase(t)
+    # Prefer calling clean after it's defined — handle below after clean_topic_phrase
+    t = re.sub(r"\s+", " ", t).strip(" .?!,;:")
+    words = t.split()
+    # Drop trailing goal fluff / relative clauses
+    stop = {
+        "zodat", "om", "want", "en", "dan", "later", "zelf", "kunnen",
+        "so", "that", "to", "and", "then", "werkt", "works", "in",
+    }
+    cut = []
+    for w in words:
+        if cut and w.lower() in stop:
+            break
+        cut.append(w)
+        if len(cut) >= 4:
+            break
+    t = " ".join(cut).strip() or "general"
+    if len(t) > 48:
+        t = t[:48].rsplit(" ", 1)[0] or t[:48]
+    return t
 
 
 def detect_subject_intent(user_input):
@@ -1260,6 +1491,7 @@ DIMENSIONS = [
 ]
 
 ACTIVITIES = [
+    "DIAGNOSTIC",
     "RETRIEVAL",
     "APPLICATION",
     "EXPLANATION",
@@ -2381,6 +2613,14 @@ def apply_assessment(
         state
     )
 
+    # Prior-knowledge intake progress (per subject)
+    active = state.get("active_session") or {}
+    act = str((assessment or {}).get("activity") or active.get("current_activity") or "").upper()
+    if act == "DIAGNOSTIC" or active.get("diagnostic_active"):
+        sid_d = active.get("subject_id") or subject_id
+        if sid_d:
+            tick_subject_diagnostic(state, sid_d, assessment)
+
     return {
         "subject_id": subject_id,
         "concept_id": concept_id
@@ -2584,7 +2824,7 @@ def update_session_memory(state, session_info, response_text):
 
 def print_model_stats():
     """Show whether CoT ran and how long the call took."""
-    s = getattr(ask_model, "last_stats", None) or {}
+    s = {}  # prefer explicit stats from handle_turn result
     if not s:
         return
     think_req = s.get("think_requested")
@@ -2607,7 +2847,7 @@ def print_model_stats():
         parts.append(f"{s['out_tok_per_s']}tok/s")
     if streamed:
         parts.append("stream")
-    if getattr(ask_model, "last_json_retry", False):
+    if False:
         parts.append("json_retry")
     if secs is not None:
         parts.append(f"{secs}s")
@@ -2811,6 +3051,8 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         "open_threads": open_list,
         "just_resumed": bool(active.get("just_resumed")),
         "pending_goal": bool(active.get("pending_goal")),
+        "diagnostic_active": bool(active.get("diagnostic_active")),
+
         "must_advance": bool(active.get("must_advance")),
         "repeat_streak": int(active.get("repeat_streak") or 0),
     }
@@ -2892,7 +3134,8 @@ A deterministic policy chose the preferred next activity from learner state.
   (veer, hoogteverschil, …). End with one easy yes/no or fill-in check. Set
   session.thread_resolved=true. Do not re-ask the hard question.
 - If orchestrator.scaffold is true: first QUOTE what the learner got right,
-  then add the single missing piece (2–4 sentences), then ONE simpler question.
+  then add ONE small missing piece (1–3 sentences max) — a nudge, not a lecture —
+  then ONE simpler question. Do not dump the full answer on first "geen idee".
 - If orchestrator.open_thread_q is set: stay on that point; never ignore a
   partial answer that already points the right way.
 - If orchestrator.close_thread is true: fully close the gap this turn.
@@ -3384,7 +3627,148 @@ def show_resume_banner(state, subject_id):
         active["recent_questions"] = recent[-5:]
 
 
-def start_session(state, subject_id=None, pending_goal=False, is_resume=False):
+
+def get_subject_diagnostic(state, subject_id):
+    """Per-subject prior-knowledge intake status (domain-agnostic)."""
+    sub = (state.get("subjects") or {}).get(subject_id) or {}
+    d = sub.get("diagnostic")
+    if not isinstance(d, dict):
+        d = {}
+    return {
+        "status": d.get("status") or "needed",  # needed | in_progress | done
+        "turns": int(d.get("turns") or 0),
+        "max_turns": int(d.get("max_turns") or 3),
+        "level_estimate": d.get("level_estimate"),  # novice | emerging | solid | None
+        "notes": (d.get("notes") or "")[:400],
+    }
+
+
+def subject_needs_diagnostic(state, subject_id) -> bool:
+    """True only for a fresh subject still in intake — not for ongoing teaching.
+
+    - status done → False
+    - status in_progress → True (finish the 2–3 probes)
+    - status needed / missing → True only if the subject has no concepts yet
+      (eval fixtures and resumed subjects with mastery skip intake)
+    """
+    if not subject_id or subject_id not in (state.get("subjects") or {}):
+        return False
+    sub = state["subjects"][subject_id]
+    if not isinstance(sub, dict):
+        return False
+    d = get_subject_diagnostic(state, subject_id)
+    st = d.get("status") or "needed"
+    if st == "done":
+        return False
+    if st == "in_progress":
+        return True
+    # needed: only brand-new subjects (no concepts yet)
+    concepts = sub.get("concepts") or {}
+    if concepts:
+        # Legacy / eval / already-taught subject without diagnostic marker
+        sub["diagnostic"] = {
+            "status": "done",
+            "turns": int(d.get("turns") or 0),
+            "max_turns": int(d.get("max_turns") or 3),
+            "level_estimate": d.get("level_estimate") or "emerging",
+            "notes": (d.get("notes") or "auto: has concepts")[:400],
+        }
+        return False
+    return True
+
+
+def begin_subject_diagnostic(state, subject_id):
+    """Mark intake in progress after goal is known."""
+    sub = (state.get("subjects") or {}).get(subject_id)
+    if not isinstance(sub, dict):
+        return
+    d = get_subject_diagnostic(state, subject_id)
+    if d["status"] == "done":
+        active = state.get("active_session") or {}
+        if active.get("subject_id") == subject_id:
+            active["diagnostic_active"] = False
+        return
+    sub["diagnostic"] = {
+        "status": "in_progress",
+        "turns": int(d.get("turns") or 0),
+        "max_turns": int(d.get("max_turns") or 3),
+        "level_estimate": d.get("level_estimate"),
+        "notes": d.get("notes") or "",
+    }
+    active = state.get("active_session") or {}
+    active["current_activity"] = "DIAGNOSTIC"
+    active["diagnostic_active"] = True
+
+
+def tick_subject_diagnostic(state, subject_id, assessment=None):
+    """
+    After a diagnostic turn: count progress; finish when enough signal or max turns.
+    Level estimate may come from assessment.level_estimate or mastery heuristic.
+    """
+    sub = (state.get("subjects") or {}).get(subject_id)
+    if not isinstance(sub, dict):
+        return
+    d = get_subject_diagnostic(state, subject_id)
+    if d["status"] == "done":
+        return
+    turns = int(d.get("turns") or 0) + 1
+    max_t = int(d.get("max_turns") or 3)
+    level = d.get("level_estimate")
+    notes = d.get("notes") or ""
+
+    if isinstance(assessment, dict):
+        le = str(assessment.get("level_estimate") or "").strip().lower()
+        if le in ("novice", "emerging", "solid"):
+            level = le
+        n = assessment.get("diagnostic_notes") or assessment.get("evidence")
+        if isinstance(n, str) and n.strip():
+            notes = (notes + " | " + n.strip()).strip(" |")[:400]
+        # Heuristic from dimensions if model omitted level
+        if not level:
+            dims = assessment.get("dimensions") or {}
+            try:
+                vals = [float(dims.get(k, 0) or 0) for k in (
+                    "knowledge", "retrieval", "application", "explanation", "transfer"
+                )]
+                avg = sum(vals) / max(len(vals), 1)
+                if avg < 0.25:
+                    level = "novice"
+                elif avg < 0.55:
+                    level = "emerging"
+                else:
+                    level = "solid"
+            except (TypeError, ValueError):
+                pass
+        done_flag = assessment.get("diagnostic_complete")
+        if done_flag is True or str(done_flag).lower() in ("true", "yes", "1"):
+            turns = max(turns, max_t)
+
+    status = "in_progress"
+    if turns >= max_t or level:
+        # Finish after max turns, or earlier if we have a level and at least 2 turns
+        if turns >= max_t or (level and turns >= 2):
+            status = "done"
+            if not level:
+                level = "emerging"  # safe middle default
+
+    sub["diagnostic"] = {
+        "status": status,
+        "turns": turns,
+        "max_turns": max_t,
+        "level_estimate": level,
+        "notes": notes[:400],
+    }
+    active = state.get("active_session") or {}
+    if status == "done":
+        active["diagnostic_active"] = False
+        active["current_activity"] = None  # policy picks teaching next
+        active["just_resumed"] = False
+    else:
+        active["diagnostic_active"] = True
+        active["current_activity"] = "DIAGNOSTIC"
+
+
+def start_session(state, subject_id=None, pending_goal=False, is_resume=False, user_id=None):
 
     now = datetime.now().isoformat()
 
@@ -3440,9 +3824,24 @@ def start_session(state, subject_id=None, pending_goal=False, is_resume=False):
             [prev_resume] if (is_resume and prev_resume) else []
         ),
         "open_threads": open_threads,
+        "diagnostic_active": False,
     }
 
-    save_state(state)
+    # New subject (not resume): intake still needed after goal
+    if subject_id and not is_resume and subject_needs_diagnostic(state, subject_id):
+        if not pending_goal:
+            begin_subject_diagnostic(state, subject_id)
+        # if pending_goal, diagnostic starts after goal is collected
+    elif subject_id and is_resume and subject_needs_diagnostic(state, subject_id):
+        # Mid-intake resume (e.g. UI aligned to subject thread)
+        d = get_subject_diagnostic(state, subject_id)
+        if d.get("status") == "in_progress" and not pending_goal:
+            begin_subject_diagnostic(state, subject_id)
+        elif d.get("status") == "needed" and not pending_goal:
+            begin_subject_diagnostic(state, subject_id)
+
+    # Always pass user_id (or resolve from state.learner.id) — never DEFAULT_USER_ID
+    save_state(state, user_id=user_id)
 
 
 def apply_taxonomy_proposals(state, routing, focus_subject_id=None):
@@ -3644,7 +4043,7 @@ def apply_routing(state, routing, conversation):
     return None
 
 
-def close_session(state, resume_instruction=None):
+def close_session(state, resume_instruction=None, user_id=None):
 
     active = state["active_session"]
 
@@ -3692,7 +4091,8 @@ def close_session(state, resume_instruction=None):
     })
 
     state["history"] = state["history"][-100:]
-    save_state(state)
+    # Always pass user_id (or resolve from state.learner.id) — never DEFAULT_USER_ID
+    save_state(state, user_id=user_id)
 
 
 # ============================================================
@@ -4045,15 +4445,49 @@ def main():
     print(c(f"                         v{__version__}", CYAN))
     print(c("============================================================", CYAN))
     print()
+    import os
+    user_id = (os.environ.get("TUTOR_USER") or "").strip().lower()
+    if not user_id:
+        # Multi-user: simple CLI picker (no password; machine-local trust)
+        try:
+            import auth as _auth
+            names = _auth.list_usernames()
+        except Exception:
+            names = []
+        if len(names) > 1:
+            print("Beschikbare accounts:", ", ".join(names))
+            print(f"(Of: TUTOR_USER={DEFAULT_USER_ID} python tutor.py)")
+            try:
+                choice = input(f"User [{DEFAULT_USER_ID}]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = ""
+            user_id = choice if choice in names else (
+                DEFAULT_USER_ID if DEFAULT_USER_ID in names else (names[0] if names else DEFAULT_USER_ID)
+            )
+        else:
+            user_id = DEFAULT_USER_ID
+    state_path = resolve_state_path(user_id)
     print(f"Model : {MODEL_NAME}")
     print(f"Think : {THINK}  (False = no chain-of-thought)")
     print(f"Stream: {STREAM}")
-    print(f"State : {STATE_FILE}")
+    print(f"User  : {user_id}")
+    print(f"State : {state_path}")
     print()
 
-    state = load_state()
+    state = load_state(user_id=user_id)
+    # Guard: if file somehow has another learner.id, do not keep teaching as them
+    try:
+        lid = str((state.get("learner") or {}).get("id") or "").lower()
+        if lid and lid != user_id:
+            print(c(
+                f"WAARSCHUWING: state learner.id={lid!r} ≠ user {user_id!r}. "
+                f"Controleer data/users/{user_id}/ vs legacy learner_state.json",
+                YELLOW,
+            ))
+    except Exception:
+        pass
     rebuild_review_queue(state)
-    save_state(state)
+    save_state(state, user_id=user_id)
     conversation: list = []
 
     active = state.get("active_session") or {}
@@ -4071,7 +4505,7 @@ def main():
         # Retrieval on first real turn, but do not dump a question until the learner engages
         active["just_resumed"] = True
         active["current_activity"] = active.get("current_activity") or "RETRIEVAL"
-        save_state(state)
+        save_state(state, user_id=user_id)
     else:
         n_subjects = len(state.get("subjects") or {})
         if n_subjects > 0:
@@ -4101,7 +4535,7 @@ def main():
             act = state.get("active_session") or {}
             if act.get("active"):
                 close_session(state, act.get("resume_instruction"))
-            save_state(state)
+            save_state(state, user_id=user_id)
             print(c("Saved.", GREEN))
             break
 
@@ -4132,6 +4566,7 @@ def main():
                 conversation=conversation,
                 save=True,
                 stream=STREAM,
+                user_id=user_id,
             )
         except Exception as e:
             print(c(f"Turn error: {e}", RED))
@@ -4162,8 +4597,8 @@ def main():
             q = answer or r.get("resume_question") or ""
             if q:
                 print(c("Eerst even ophalen:", YELLOW))
-                streamed = bool(getattr(ask_model, "did_stream_response", False)) or bool(
-                    stats.get("streamed")
+                streamed = bool(stats.get("streamed")) or bool(
+                    (result or {}).get("streamed_response")
                 )
                 show_tutor(q, already_streamed=streamed)
             _print_cli_stats(stats)
@@ -4196,15 +4631,16 @@ def main():
                 print()
                 show_tutor(
                     answer,
-                    already_streamed=getattr(ask_model, "did_stream_response", False),
+                    already_streamed=bool(stats.get("streamed"))
+                    or bool((result or {}).get("streamed_response")),
                 )
             print()
             continue
 
         if kind in ("new_subject", "clarify", "message") or answer:
-            streamed = bool(getattr(ask_model, "did_stream_response", False)) or bool(
-                stats.get("streamed")
-            ) or bool((result or {}).get("streamed_response"))
+            streamed = bool(stats.get("streamed")) or bool(
+                (result or {}).get("streamed_response")
+            )
             show_tutor(answer, already_streamed=streamed)
             _print_cli_stats(stats)
             continue

@@ -155,6 +155,7 @@
     <span class="badge" id="modelBadge">…</span>
     <button class="icon-btn" id="btnState" title="State">ⓘ</button>
     <span id="user-badge"></span>
+    <button type="button" id="btn-logout" title="Uitloggen" style="margin-left:8px;font-size:0.75rem;padding:4px 8px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:6px;cursor:pointer;">Uit</button>
   </header>
   <div class="layout">
     <aside id="sidebar">
@@ -186,6 +187,8 @@
     let inFlight = false;
     let activeThread = "_lobby";
     let subjects = [];
+    /** Bound after login/bootstrap — reject API payloads for another account. */
+    let expectedUser = null;
 
     function subjectTitle(id) {
       if (!id || id === "_lobby") return "Lobby";
@@ -340,10 +343,34 @@
     function apiFetch(url, opts) {
       opts = opts || {};
       opts.credentials = "same-origin";
+      opts.cache = "no-store";
       if (opts.headers && opts.body && !opts.headers["Content-Type"]) {
         /* keep */
       }
+      // Bust intermediary caches on GETs (tunnel / browser)
+      if (!opts.method || opts.method.toUpperCase() === "GET") {
+        const sep = url.indexOf("?") >= 0 ? "&" : "?";
+        url = url + sep + "_ts=" + Date.now();
+      }
       return fetch(url, opts);
+    }
+
+    function assertUser(data, context) {
+      if (!data || !data.user_id) return true;
+      if (!expectedUser) {
+        expectedUser = data.user_id;
+        return true;
+      }
+      if (data.user_id !== expectedUser) {
+        statusEl.textContent =
+          "Isolatie-fout: verwacht " + expectedUser + " maar server gaf " +
+          data.user_id + " (" + (context || "") + "). Log opnieuw in.";
+        subjects = [];
+        renderSubjects([]);
+        showLogin("Account-mismatch — log opnieuw in als " + expectedUser);
+        return false;
+      }
+      return true;
     }
 
     function showLogin(msg) {
@@ -357,12 +384,27 @@
       if (ov) ov.classList.remove("show");
     }
 
+    async function doLogout() {
+      try {
+        await apiFetch("/api/auth/logout", { method: "POST" });
+      } catch (e) {}
+      expectedUser = null;
+      subjects = [];
+      activeThread = "_lobby";
+      renderHistory([]);
+      const badge = document.getElementById("user-badge");
+      if (badge) badge.textContent = "";
+      showLogin();
+      statusEl.textContent = "Uitgelogd.";
+    }
+
     async function doLogin() {
       const u = (document.getElementById("login-user").value || "").trim();
       const pw = document.getElementById("login-pass").value || "";
       const err = document.getElementById("login-error");
       err.textContent = "";
       try {
+        expectedUser = null;
         const r = await apiFetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -373,10 +415,18 @@
           err.textContent = data.detail || "Login mislukt";
           return;
         }
+        expectedUser = data.user_id || u.toLowerCase();
         hideLogin();
         const badge = document.getElementById("user-badge");
         if (badge) badge.textContent = data.display_name || data.user_id || "";
         await bootstrap();
+        // Cookie not stored (e.g. Secure on HTTP) → still logged-out
+        const ov = document.getElementById("login-overlay");
+        if (ov && ov.classList.contains("show")) {
+          err.textContent =
+            "Login OK maar sessie-cookie werd niet bewaard. Open de site via HTTPS, " +
+            "of zet op de server TUTOR_COOKIE_SECURE=0 en herstart de gateway.";
+        }
       } catch (e) {
         err.textContent = e.message || String(e);
       }
@@ -387,21 +437,26 @@
         const r = await apiFetch("/api/bootstrap");
         const data = await r.json();
         if (r.status === 401 || data.auth_required) {
+          expectedUser = null;
           showLogin();
           statusEl.textContent = "Inloggen…";
           return;
         }
         if (data.user_id) {
+          if (!expectedUser) expectedUser = data.user_id;
+          if (!assertUser(data, "bootstrap")) return;
           const badge = document.getElementById("user-badge");
           if (badge) badge.textContent = data.user_id;
         }
 
         modelBadge.textContent = data.model || "tutor";
-        if (data.subjects) subjects = data.subjects;
+        subjects = data.subjects || [];
+        renderSubjects(subjects);
         setActiveSubject(data.thread_id || "_lobby");
         renderHistory(data.history || []);
-        const n = (data.subjects || []).length;
-        statusEl.textContent = "Klaar · " + n + " onderwerp(en). Tik ☰ of typ wat je wilt leren.";
+        const n = subjects.length;
+        statusEl.textContent =
+          "Klaar · " + (data.user_id || "") + " · " + n + " onderwerp(en). Tik ☰ of typ wat je wilt leren.";
       } catch (e) {
         statusEl.textContent = "Gateway offline? " + e.message;
       }
@@ -409,6 +464,18 @@
 
     function handleResult(data, opts) {
       opts = opts || {};
+      if (!assertUser(data, "turn")) return;
+      // Cookie may change if another tab logged in as someone else
+      if (data.user_id) {
+        const badge = document.getElementById("user-badge");
+        if (badge) {
+          const prev = badge.textContent || "";
+          badge.textContent = data.user_id;
+          if (prev && prev !== data.user_id) {
+            statusEl.textContent = "Account gewisseld naar " + data.user_id + " (andere tab?)";
+          }
+        }
+      }
       if (data.subjects) {
         subjects = data.subjects;
         renderSubjects(subjects);
@@ -429,11 +496,7 @@
         if (data.subjects) renderSubjects(data.subjects);
         return;
       }
-      if (data.kind === "tree") {
-        const div = addBubble("tutor", data.response || "");
-        div.classList.add("tree");
-        return;
-      }
+      // tree handled with state/help below (deduped)
       if (data.kind === "subjects") {
         const names = (data.subjects || []).map((s) => s.title).join(", ") || "geen";
         addBubble("system", "Onderwerpen: " + names);
@@ -472,8 +535,15 @@
         return;
       }
       if ((data.kind === "state" || data.kind === "state_full" || data.kind === "help" ||
-           data.kind === "quit" || data.kind === "reset" || data.kind === "debug") && data.response) {
-        addBubble("system", data.response);
+           data.kind === "quit" || data.kind === "reset" || data.kind === "debug" ||
+           data.kind === "tree") && data.response) {
+        // Avoid exact double bubble (history + handleResult)
+        if (!textsRoughlyEqual(lastBubbleText("system"), data.response) &&
+            !textsRoughlyEqual(lastBubbleText("tutor"), data.response)) {
+          const cls = data.kind === "tree" ? "tutor" : "system";
+          const div = addBubble(cls, data.response);
+          if (data.kind === "tree") div.classList.add("tree");
+        }
         return;
       }
       if (!opts.streamedBody && data.response) {
@@ -614,14 +684,36 @@
       send();
     };
 
+    const logoutBtn = document.getElementById("btn-logout");
+    if (logoutBtn) logoutBtn.addEventListener("click", doLogout);
     const loginBtn = document.getElementById("login-btn");
     if (loginBtn) {
       loginBtn.onclick = doLogin;
-      document.getElementById("login-pass").addEventListener("keydown", (e) => {
-        if (e.key === "Enter") doLogin();
-      });
+      const passEl = document.getElementById("login-pass");
+      if (passEl) {
+        passEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") doLogin();
+        });
+      }
     }
     bootstrap();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        apiFetch("/api/auth/me").then(async (r) => {
+          const data = await r.json().catch(() => ({}));
+          if (!data.ok || !data.user_id) {
+            showLogin();
+            return;
+          }
+          const badge = document.getElementById("user-badge");
+          const shown = badge ? badge.textContent : "";
+          if (shown && shown !== data.user_id) {
+            if (badge) badge.textContent = data.user_id;
+            await bootstrap();
+          }
+        }).catch(() => {});
+      }
+    });
 
     input.focus();
   </script>

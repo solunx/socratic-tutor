@@ -32,10 +32,17 @@ if str(ROOT) not in sys.path:
 import auth  # noqa: E402
 import core  # noqa: E402
 import tutor as T  # noqa: E402
+# Multi-user: never fall back to DEFAULT_USER_ID="george" on missing user_id
+T.STRICT_USERS = True
+try:
+    import debug_events  # noqa: E402
+except Exception as _e:
+    debug_events = None  # type: ignore
+    print('[gateway] debug_events import failed:', _e)
 
 WEB_DIR = ROOT / "web"
 CONV_FILE = ROOT / "web_conversation.json"
-DEFAULT_SESSION = "george"
+DEFAULT_SESSION = "default"
 MAX_CONV_MESSAGES = 200
 LOBBY = "_lobby"
 
@@ -66,13 +73,23 @@ def _login_fail(ip: str) -> None:
 
 
 def _cookie_secure(request: Request) -> bool:
-    """Set Secure flag when HTTPS or explicitly configured for public exposure."""
+    """Set Secure only when the browser is on HTTPS.
+
+    Important: do NOT force Secure just because TUTOR_PUBLIC=1 — accessing
+    http://<tailnet-ip>:8790 would then refuse to store the cookie and login
+    appears to do nothing (password OK, then overlay returns).
+    Use TUTOR_COOKIE_SECURE=1 only when you always serve via HTTPS (Funnel).
+    """
     import os
-    if os.environ.get("TUTOR_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"):
+    # Explicit override (admin knows they only use HTTPS)
+    force = os.environ.get("TUTOR_COOKIE_SECURE", "").strip().lower()
+    if force in ("1", "true", "yes"):
+        # Still prefer actual HTTPS; if someone forces on HTTP, warn once
+        if request.url.scheme != "https" and (request.headers.get("x-forwarded-proto") or "").lower() != "https":
+            print("[gateway] WARNING: TUTOR_COOKIE_SECURE=1 but request is HTTP — cookie may be dropped by browser")
         return True
-    if os.environ.get("TUTOR_PUBLIC", "").strip().lower() in ("1", "true", "yes"):
-        return True
-    # Detect TLS termination
+    if force in ("0", "false", "no"):
+        return False
     if request.url.scheme == "https":
         return True
     if (request.headers.get("x-forwarded-proto") or "").lower() == "https":
@@ -101,7 +118,7 @@ def _last_unanswered_tutor_q(conv: list) -> str | None:
 app = FastAPI(
     title="Local Agent Gateway",
     version="0.5.0",
-    description="Multi-user tutor gateway (Tailscale or TLS public)",
+    description="Multi-user tutor gateway (private network or TLS public)",
 )
 
 
@@ -111,6 +128,14 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
+    # Never let a proxy/CDN serve another user's bootstrap/subjects/state.
+    # Different devices do not share cookies; cached /api/* would look like
+    # "isolation is broken" when two people use the same public URL.
+    path = request.url.path or ""
+    if path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Cookie"
     # Only send HSTS when explicitly public+HTTPS
     import os
     if os.environ.get("TUTOR_PUBLIC", "").strip().lower() in ("1", "true", "yes"):
@@ -126,6 +151,21 @@ def _current_user(request: Request) -> str | None:
     return auth.parse_session_token(token)
 
 
+def _log_turn(user_id, message, thread_from, thread_to, result):
+    if debug_events is None:
+        return
+    try:
+        debug_events.log_turn(
+            user_id,
+            message=message or "",
+            thread_from=thread_from,
+            thread_to=thread_to,
+            result=result or {},
+        )
+    except Exception as e:
+        print("[gateway] event log failed:", type(e).__name__, e)
+
+
 def _require_user(request: Request) -> str:
     uid = _current_user(request)
     if not uid:
@@ -137,8 +177,8 @@ def _require_user(request: Request) -> str:
 def _bootstrap_users():
     """Ensure registry + optional legacy migration for first user."""
     try:
-        auth.ensure_default_user("george")
-        notes = auth.migrate_legacy_files("george")
+        auth.ensure_default_user("default")
+        notes = auth.migrate_legacy_files("default")
         if notes:
             print("[auth] legacy migrate:", "; ".join(notes))
     except Exception as e:
@@ -174,6 +214,11 @@ def auth_login(body: LoginBody, request: Request, response: Response):
     )
     data = auth.load_users()
     display = (data.get("users") or {}).get(uid, {}).get("display_name") or uid
+    try:
+        if debug_events is not None:
+            debug_events.log_event(uid, "login", ip=_client_ip(request))
+    except Exception:
+        pass
     return {"ok": True, "user_id": uid, "display_name": display}
 
 
@@ -191,6 +236,41 @@ def auth_me(request: Request):
     data = auth.load_users()
     display = (data.get("users") or {}).get(uid, {}).get("display_name") or uid
     return {"ok": True, "user_id": uid, "display_name": display}
+
+
+@app.get("/api/debug/whoami")
+def debug_whoami(request: Request):
+    """Truth source for isolation bugs: cookie user vs disk paths vs subject keys.
+
+    Open this URL on phone AND laptop while logged in — the JSON must match the
+    badge user, not the other device's account.
+    """
+    uid = _current_user(request)
+    if not uid:
+        return {"ok": False, "error": "not_logged_in"}
+    try:
+        state_path = str(auth.state_path(uid))
+    except Exception:
+        state_path = "?"
+    try:
+        conv_path = str(auth.conv_path(uid))
+    except Exception:
+        conv_path = "?"
+    state = T.load_state(user_id=uid)
+    lid = str((state.get("learner") or {}).get("id") or "")
+    subjects = sorted((state.get("subjects") or {}).keys())
+    store = _load_store(uid)
+    threads = sorted((store.get("threads") or {}).keys())
+    return {
+        "ok": True,
+        "cookie_user": uid,
+        "learner_id_in_state": lid,
+        "state_path": state_path,
+        "conv_path": conv_path,
+        "subject_ids": subjects,
+        "thread_ids": threads,
+        "match": (lid.lower() == uid.lower()) if lid else False,
+    }
 
 
 
@@ -242,10 +322,11 @@ def _normalize_store(store: Any) -> dict:
 
 
 def _load_store(session_id: str) -> dict:
-    if session_id in _store:
-        store = _normalize_store(_store[session_id])
-        _store[session_id] = store
-        return store
+    """Always re-read conversation from disk for this user_id.
+
+    In-memory cache alone caused stale/wrong threads after manual repairs and
+    made multi-device debugging impossible (process kept old blobs).
+    """
     # Per-user conversation store (session_id == authenticated user_id)
     try:
         path = auth.conv_path(session_id)
@@ -255,6 +336,17 @@ def _load_store(session_id: str) -> dict:
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # Refuse files that claim a different session_id
+            if isinstance(data, dict):
+                claimed = str(data.get("session_id") or "").strip().lower()
+                if claimed and claimed != str(session_id).strip().lower():
+                    print(
+                        f"[gateway] CONV MISMATCH: file session_id={claimed!r} "
+                        f"but load for {session_id!r} ({path}) — using empty store"
+                    )
+                    store = _empty_store()
+                    _store[session_id] = store
+                    return store
             if isinstance(data, list):
                 store["threads"][LOBBY] = data
             elif isinstance(data, dict):
@@ -307,6 +399,28 @@ def _save_store(session_id: str, store: dict) -> None:
             pass
 
 
+
+def _prefer_teaching_thread(state: dict, tid: str) -> str:
+    """Goal collection + diagnostic intake belong on the subject chat, not lobby."""
+    active = state.get("active_session") or {}
+    sid = active.get("subject_id")
+    if not sid or not active.get("active"):
+        return tid or LOBBY
+    sid = str(sid)
+    if (tid or LOBBY) != LOBBY:
+        return tid
+    if (
+        active.get("pending_goal")
+        or active.get("diagnostic_active")
+        or (
+            hasattr(T, "subject_needs_diagnostic")
+            and T.subject_needs_diagnostic(state, sid)
+        )
+    ):
+        return sid
+    return tid or LOBBY
+
+
 def _thread_id_from_state(state: dict) -> str:
     active = state.get("active_session") or {}
     sid = active.get("subject_id")
@@ -318,7 +432,7 @@ def _thread_id_from_state(state: dict) -> str:
 
 
 
-def _align_state_to_thread(state: dict, tid: str) -> bool:
+def _align_state_to_thread(state: dict, tid: str, user_id: str | None = None) -> bool:
     """If the UI is on a subject chat, make learner state match that subject.
 
     Sidebar only loads history; it does not switch active_session. Without this,
@@ -339,13 +453,26 @@ def _align_state_to_thread(state: dict, tid: str) -> bool:
         if active.get("active") and active.get("subject_id") and active.get("subject_id") != tid:
             # Close previous session bookmark without wiping UI threads
             try:
-                T.close_session(state, active.get("resume_instruction"))
+                T.close_session(
+                    state, active.get("resume_instruction"), user_id=user_id
+                )
             except Exception:
                 state["active_session"]["active"] = False
-        T.start_session(state, tid, is_resume=True)
+        # Preserve intake flags if this subject is still mid goal/diagnostic
+        prev = state.get("active_session") or {}
+        was_pending = bool(prev.get("pending_goal")) and prev.get("subject_id") == tid
+        T.start_session(state, tid, is_resume=True, user_id=user_id)
         st = state.get("active_session") or {}
         st["just_resumed"] = False  # continuing open chat, not "waar was ik"
-        st["pending_goal"] = False
+        if was_pending:
+            st["pending_goal"] = True
+        # Resume diagnostic intake if not finished
+        if hasattr(T, "subject_needs_diagnostic") and T.subject_needs_diagnostic(state, tid):
+            d = T.get_subject_diagnostic(state, tid)
+            if d.get("status") == "in_progress" or (
+                d.get("status") == "needed" and not st.get("pending_goal")
+            ):
+                T.begin_subject_diagnostic(state, tid)
         return True
     except Exception:
         return False
@@ -445,6 +572,31 @@ def _apply_topic_switch(store: dict, old_tid: str, new_tid: str, old_conv: list,
         if not lobby or str((lobby[-1] or {}).get("content") or "") != note:
             lobby.append({"role": "system", "content": note})
 
+    if result.get("kind") == "new_subject":
+        # Brand-new topic: land on subject chat with goal prompt (no Hervat banner)
+        sub_title = new_tid
+        for s in (result.get("subjects") or []):
+            if isinstance(s, dict) and str(s.get("id") or "") == str(new_tid):
+                sub_title = s.get("title") or sub_title
+                break
+        head = f"Nieuw onderwerp: {sub_title}"
+        if not any(
+            isinstance(m, dict)
+            and m.get("role") == "system"
+            and str(m.get("content") or "").startswith("Nieuw onderwerp:")
+            for m in new_conv[-4:]
+        ):
+            new_conv.append({"role": "system", "content": head})
+        q = (result.get("response") or "").strip()
+        if q and (
+            not new_conv
+            or str((new_conv[-1] or {}).get("content") or "").strip() != q
+        ):
+            new_conv.append({"role": "assistant", "content": q})
+        # Strip goal/diagnostic replies that were incorrectly written on lobby
+        store["active_thread"] = new_tid
+        return new_tid
+
     if result.get("kind") == "resume":
         # If this subject thread already ends on an unanswered tutor question,
         # do NOT re-ask / re-banner — just land on that open question.
@@ -486,7 +638,7 @@ def _apply_topic_switch(store: dict, old_tid: str, new_tid: str, old_conv: list,
     return new_tid
 
 
-def _result_dict(result: dict) -> dict:
+def _result_dict(result: dict, user_id: str | None = None) -> dict:
     """JSON-safe subset for SSE final event / TurnResponse."""
     out = {
         "ok": bool(result.get("ok", True)),
@@ -509,6 +661,9 @@ def _result_dict(result: dict) -> dict:
     ):
         if key in result and result[key] is not None:
             out[key] = result[key]
+    uid = user_id or result.get("user_id")
+    if uid:
+        out["user_id"] = uid
     return out
 
 
@@ -561,9 +716,12 @@ def bootstrap(request: Request, agent: str = "tutor"):
             "agents": ["tutor"],
             "model": getattr(T, "MODEL_NAME", ""),
         }
-    base = core.bootstrap()
+    base = core.bootstrap(user_id=uid)
     store = _load_store(uid)
     state = T.load_state(user_id=uid)
+    # Always prefer authenticated user's subjects (never a shared/default load)
+    base["subjects"] = core.subjects_payload(state)
+    base["summary"] = core.state_summary(state)
     # Start in lobby (meta) unless user was mid-subject chat
     tid = store.get("active_thread") or LOBBY
     if tid != LOBBY and tid not in (store.get("threads") or {}):
@@ -616,7 +774,7 @@ def get_thread(request: Request, thread_id: str, agent: str = "tutor"):
     store["active_thread"] = tid
     # Align teaching state to the chat the user opened in the sidebar
     state = T.load_state(user_id=uid)
-    if _align_state_to_thread(state, tid):
+    if _align_state_to_thread(state, tid, user_id=uid):
         T.save_state(state, user_id=uid)
     conv = _get_thread(store, tid)
     _save_store(uid, store)
@@ -633,12 +791,18 @@ def turn(request: Request, req: TurnRequest):
     if req.agent != "tutor":
         raise HTTPException(400, f"Agent '{req.agent}' not registered. Available: tutor")
     sid = _require_user(request)
+    lock = T.acquire_user_lock(sid)
+    with lock:
+      return _turn_locked(request, req, sid)
+
+def _turn_locked(request: Request, req: TurnRequest, sid: str):
     store = _load_store(sid)
     state = T.load_state(user_id=sid)
-    tid = req.thread_id or store.get("active_thread") or _thread_id_from_state(state)
-    if _align_state_to_thread(state, tid):
+    tid_from = req.thread_id or store.get("active_thread") or _thread_id_from_state(state)
+    tid = _prefer_teaching_thread(state, tid_from)
+    if _align_state_to_thread(state, tid, user_id=sid):
         T.save_state(state, user_id=sid)
-        store["active_thread"] = tid
+    store["active_thread"] = tid
     conv = _get_thread(store, tid)
     result = core.handle_turn(
         req.message,
@@ -657,7 +821,7 @@ def turn(request: Request, req: TurnRequest):
             lobby_conv.append({"role": "assistant", "content": resp})
         store["active_thread"] = LOBBY
         _save_store(sid, store)
-        out = _result_dict(result)
+        out = _result_dict(result, sid)
         out["thread_id"] = LOBBY
         out["history"] = _history_for_ui(lobby_conv)
         out["subjects"] = result.get("subjects") or core.subjects_payload(state2)
@@ -672,15 +836,21 @@ def turn(request: Request, req: TurnRequest):
             new_tid = str(result["subject_id"])
     routing = (result.get("routing") or {}) if isinstance(result, dict) else {}
     action = str(routing.get("action") or "").lower()
+    if result.get("kind") == "new_subject" and result.get("subject_id"):
+        new_tid = str(result["subject_id"])
     explicit_switch = (
         action in ("switch", "new_subject")
-        or result.get("kind") == "resume"
+        or result.get("kind") in ("resume", "new_subject")
         or result.get("switched_from_thread")
     )
-    if explicit_switch and new_tid:
+    if explicit_switch and new_tid and str(new_tid) != str(tid):
         tid = _apply_topic_switch(
             store, tid, new_tid, conv, result, req.message or ""
         )
+    elif explicit_switch and new_tid:
+        # Same subject (e.g. false-positive switch) — keep messages on this thread
+        store["active_thread"] = str(new_tid)
+        tid = str(new_tid)
         if result.get("resume_reused"):
             # Continue the open question already on the thread — no second ask
             state2 = T.load_state(user_id=sid)
@@ -695,11 +865,12 @@ def turn(request: Request, req: TurnRequest):
         store["active_thread"] = tid
         if tid and tid != LOBBY and tid in (state2.get("subjects") or {}):
             if (state2.get("active_session") or {}).get("subject_id") != tid:
-                _align_state_to_thread(state2, tid)
+                _align_state_to_thread(state2, tid, user_id=sid)
                 T.save_state(state2, user_id=sid)
     store["active_thread"] = tid
     _save_store(sid, store)
-    out = _result_dict(result)
+    _log_turn(sid, req.message or "", tid_from, tid, result)
+    out = _result_dict(result, sid)
     out["thread_id"] = tid
     out["history"] = _history_for_ui(_get_thread(store, tid))
     return out
@@ -717,18 +888,19 @@ def turn_stream(request: Request, req: TurnRequest):
         raise HTTPException(400, "Empty message")
 
     def event_stream() -> Generator[str, None, None]:
-        import queue
-        import threading
-        try:
-            yield from _event_stream_inner()
-        except Exception as e:
-            yield _sse({
-                "type": "done",
-                "ok": False,
-                "kind": "error",
-                "response": f"Server error: {type(e).__name__}: {e}",
-                "agent": "tutor",
-            })
+        # Hold per-user lock for whole stream (load → LLM → save)
+        lock = T.acquire_user_lock(sid)
+        with lock:
+            try:
+                yield from _event_stream_inner()
+            except Exception as e:
+                yield _sse({
+                    "type": "done",
+                    "ok": False,
+                    "kind": "error",
+                    "response": f"Server error: {type(e).__name__}: {e}",
+                    "agent": "tutor",
+                })
 
     def _event_stream_inner() -> Generator[str, None, None]:
         import queue
@@ -736,10 +908,11 @@ def turn_stream(request: Request, req: TurnRequest):
 
         store = _load_store(sid)
         state = T.load_state(user_id=sid)
-        tid = req.thread_id or store.get("active_thread") or _thread_id_from_state(state)
-        if _align_state_to_thread(state, tid):
+        tid_from = req.thread_id or store.get("active_thread") or _thread_id_from_state(state)
+        tid = _prefer_teaching_thread(state, tid_from)
+        if _align_state_to_thread(state, tid, user_id=sid):
             T.save_state(state, user_id=sid)
-            store["active_thread"] = tid
+        store["active_thread"] = tid
         conv = _get_thread(store, tid)
 
         # Commands: instant done, no tokens
@@ -754,7 +927,8 @@ def turn_stream(request: Request, req: TurnRequest):
                 conv.append({"role": "assistant", "content": resp})
             store["active_thread"] = tid
             _save_store(sid, store)
-            payload = _result_dict(cmd)
+            _log_turn(sid, message, tid_from, tid, cmd)
+            payload = _result_dict(cmd, sid)
             payload["type"] = "done"
             payload["thread_id"] = tid
             payload["history"] = _history_for_ui(conv)
@@ -821,7 +995,7 @@ def turn_stream(request: Request, req: TurnRequest):
                 lobby_conv.append({"role": "assistant", "content": resp})
             store["active_thread"] = LOBBY
             _save_store(sid, store)
-            out = _result_dict(result)
+            out = _result_dict(result, sid)
             out["type"] = "done"
             out["thread_id"] = LOBBY
             out["history"] = _history_for_ui(lobby_conv)
@@ -837,15 +1011,20 @@ def turn_stream(request: Request, req: TurnRequest):
                 new_tid = str(result["subject_id"])
         routing = (result.get("routing") or {}) if isinstance(result, dict) else {}
         action = str(routing.get("action") or "").lower()
+        if result.get("kind") == "new_subject" and result.get("subject_id"):
+            new_tid = str(result["subject_id"])
         explicit_switch = (
             action in ("switch", "new_subject")
-            or result.get("kind") == "resume"
+            or result.get("kind") in ("resume", "new_subject")
             or result.get("switched_from_thread")
         )
-        if explicit_switch and new_tid:
+        if explicit_switch and new_tid and str(new_tid) != str(tid):
             tid = _apply_topic_switch(
                 store, tid, new_tid, conv, result, message
             )
+        elif explicit_switch and new_tid:
+            store["active_thread"] = str(new_tid)
+            tid = str(new_tid)
             if result.get("resume_reused"):
                 state2 = T.load_state(user_id=sid)
                 active = state2.get("active_session") or {}
@@ -857,7 +1036,8 @@ def turn_stream(request: Request, req: TurnRequest):
                     T.save_state(state2, user_id=sid)
         store["active_thread"] = tid
         _save_store(sid, store)
-        out = _result_dict(result)
+        _log_turn(sid, message, tid_from, tid, result)
+        out = _result_dict(result, sid)
         out["type"] = "done"
         out["thread_id"] = tid
         out["history"] = _history_for_ui(_get_thread(store, tid))

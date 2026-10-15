@@ -64,6 +64,32 @@ def suggest_next_activity(state):
             "force": False,
         }
 
+
+    # 0-diagnostic) New subject prior-knowledge intake (before teaching)
+    sid_act = active.get("subject_id")
+    if sid_act and T.subject_needs_diagnostic(state, sid_act):
+        # Goal must be collected first
+        if not active.get("pending_goal"):
+            d = T.get_subject_diagnostic(state, sid_act)
+            if d.get("status") != "done":
+                if d.get("status") == "needed":
+                    T.begin_subject_diagnostic(state, sid_act)
+                return {
+                    "activity": "DIAGNOSTIC",
+                    "concept_id": cid,
+                    "subject_id": sid_act,
+                    "reason": (
+                        "PRIOR-KNOWLEDGE INTAKE: ask 1 short diagnostic question "
+                        f"(turn {d.get('turns', 0)+1}/{d.get('max_turns', 3)}). "
+                        "No teaching yet. Probe what they already know/do; "
+                        "vary angle (definition / example / mechanism). "
+                        "Set assessment.activity=DIAGNOSTIC; after enough signal set "
+                        "level_estimate=novice|emerging|solid and diagnostic_complete=true."
+                    ),
+                    "force": True,
+                    "diagnostic": True,
+                }
+
     # 0a) Explicit "leg uit" or repeated stuck → FULL TEACH then close thread
     if active.get("force_full_teach"):
         active["force_full_teach"] = False
@@ -101,7 +127,7 @@ def suggest_next_activity(state):
         focus_q = (ot or {}).get("q") if ot else None
         tries = int((ot or {}).get("tries") or 0)
         # If already scaffolded many times, escalate to full teach
-        if tries >= 3:
+        if tries >= 4:
             if ot:
                 ot["status"] = "closed"
                 ot["closed_reason"] = "full_teach_after_tries"
@@ -123,8 +149,10 @@ def suggest_next_activity(state):
             "concept_id": cid,
             "subject_id": sid,
             "reason": (
-                "learner stuck — build on what THEY already said, add one missing "
-                "piece (2–4 sentences), then ONE simpler question"
+                "learner stuck — do NOT give the full answer. "
+                "Give ONE small nudge (L1–L2): a concrete example, contrast, or "
+                "partial step from THEIR words. Then ONE simpler question. "
+                "Productive struggle > comfort."
                 + (f" | {focus_q[:70]}" if focus_q else "")
             ),
             "force": True,
@@ -134,7 +162,7 @@ def suggest_next_activity(state):
 
     # 0b) Open thread: after 3 tries → FULL TEACH and CLOSE (stop the loop)
     ot = get_open_thread(active)
-    if ot and int(ot.get("tries") or 0) >= 3 and ot.get("status") != "closed":
+    if ot and int(ot.get("tries") or 0) >= 4 and ot.get("status") != "closed":
         focus_q = ot.get("q")
         ot["status"] = "closed"
         ot["closed_reason"] = "max_tries_full_teach"

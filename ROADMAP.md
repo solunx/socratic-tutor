@@ -1,8 +1,8 @@
 # Socratic Offline Tutor — Architecture Roadmap & Research Notes
 
 Status: living document  
-Last updated: 2026-10-04  
-Project: `/home/sun/dev/tutor` (server) · artifacts mirror in this workspace
+Last updated: 2026-10-15  
+Project: local tutor directory on your GPU/LLM host
 
 ---
 
@@ -28,7 +28,7 @@ Not a chatbot that answers. A **persistent learner coach** that:
 
 ---
 
-## 2. Current stack (v0.2.1 → evolving)
+## 2. Current stack (v0.5.1)
 
 | Piece | Choice |
 |-------|--------|
@@ -284,6 +284,8 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 | 2026-10 | Taxonomy + pending MC auto-promote (Phase E foundation) |
 | 2026-10 | Next: LLM propose_parent / richer tree, or streaming |
 | 2026-10 | Observability: metrics_lib + per-component token breakdown; measure before optimising |
+| 2026-10 | Multi-user auth + per-user `data/users/<id>/` |
+| 2026-10-15 | **Isolation bug fixed:** `start_session`/`close_session` called `save_state(state)` without `user_id` → wrote into `DEFAULT_USER_ID`. Fix: `_resolve_uid` from `learner.id`, `STRICT_USERS` in gateway, pass `user_id` on session paths; regression `tools/test_isolation_save.py` |
 
 ---
 

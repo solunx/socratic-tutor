@@ -94,7 +94,7 @@ After a **correct** verdict, policy advances toward application/transfer instead
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Interfaces                                             │
-│   CLI (tutor.py)  ·  Web UI (Tailscale)  ·  (future TTS) │
+│   CLI (tutor.py)  ·  Web UI (private network / HTTPS)  ·  (future TTS) │
 └───────────────────────────┬─────────────────────────────┘
                             │  core.handle_turn()
 ┌───────────────────────────▼─────────────────────────────┐
@@ -128,13 +128,15 @@ After a **correct** verdict, policy advances toward application/transfer instead
 | `gateway/app.py` | FastAPI: auth, SSE, per-subject threads, lobby |
 | `web/index.html` | Mobile-friendly UI (login, lobby, streaming) |
 | `tools/create_user.py` | Create / reset user accounts |
-| `data/users/<id>/` | Per-user state (not committed) |
+| `tools/check_users.py` | Inspect per-user state/threads on disk |
+| `tools/test_isolation_save.py` | Regression: no cross-user `save_state` |
+| `tools/restore_george_clean.py` | Optional: restore one account from backup |
+| `data/users/<id>/` | Per-user state + chats (not committed) |
 | `evals/` | Policy + multi-turn regression cases |
 | `docs/HOW_TO_USE.md` | End-user guide (web only) |
 | `docs/PUBLIC_ACCESS.md` | HTTPS / Funnel for friends outside Tailscale |
 | `docs/VISION.md` | Product vision & pedagogy |
 | `ROADMAP.md` | Research notes, prior art, decision log |
-| `docs/VISION.md` | Full product vision and journey from v0 → now |
 
 ### Interfaces
 
@@ -159,7 +161,7 @@ python tutor.py
 
 # Web (private bind)
 python -m uvicorn gateway.app:app --host 0.0.0.0 --port 8790
-# Open http://<tailscale-ip>:8790/ from phone/laptop on the tailnet
+# Open http://<private-or-tailscale-host>:8790/ from phone/laptop on the tailnet
 ```
 
 Useful commands: `/help` · `/subjects` · `/tree` · `/state` · `/state full` · `/review` · `/quit`
@@ -197,14 +199,29 @@ MIT (see `LICENSE` if present). Prior-art references and their licenses are list
 
 ## Status
 
-**v0.4.2** — usable CLI + web, policy engine, tree, misconceptions, FSRS, evals, streaming UI, per-subject threads.  
+**v0.5.1** — multi-user web + CLI, lobby, per-subject threads, streaming, policy/FSRS/tree/MC hygiene, diagnostic intake, **strict per-user isolation** on save/load.
+
 See `docs/VISION.md` for the original goals and how the system evolved.
+
+### Multi-user isolation (important)
+
+| Rule | Implementation |
+|------|----------------|
+| One directory per user | `data/users/<id>/{learner_state.json, web_conversation.json}` |
+| Cookie → user id | HMAC session token; every API load/save uses that id |
+| No silent “default user” | `STRICT_USERS=True` in the gateway; `save_state` resolves path from **explicit `user_id`** or **`state.learner.id`**, never maps another user’s blob onto `DEFAULT_USER_ID` |
+| Cross-write blocked | `save_state` raises if `learner.id` ≠ path user |
+| Regression | `python tools/test_isolation_save.py` must **PASS** after changes to session/save paths |
+
+Root cause of an earlier mix (vriend1 overwriting george): `start_session` / `close_session` called `save_state(state)` **without** `user_id`, which fell back to `DEFAULT_USER_ID`. Fixed in v0.5.1.
 
 
 ## Multi-user & public access
 
 - **Auth:** username/password (`auth.py`), HTTP-only session cookie, per-user data under `data/users/<id>/`.
 - **No self-signup** — `python tools/create_user.py <user>`
+- **CLI:** `python tutor.py` prompts for account (or `TUTOR_USER=george python tutor.py`).
 - **Tailscale:** private access on your network.
 - **Public friends:** [docs/PUBLIC_ACCESS.md](docs/PUBLIC_ACCESS.md) (Tailscale Funnel recommended).
 - Do **not** expose Ollama publicly.
+- API responses: `Cache-Control: private, no-store` + `Vary: Cookie` (no proxy reuse across users).

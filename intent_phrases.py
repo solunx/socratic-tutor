@@ -36,7 +36,6 @@ REPEAT_ADVANCE_PHRASES = (
 # Skip aggressive resume / force progress
 SKIP_RESUME_PHRASES = (
     "niet belangrijk",
-    "geen idee",
     "wil geen",
     "wil niet",
     "ik wil begrijpen",
@@ -45,8 +44,21 @@ SKIP_RESUME_PHRASES = (
     "overstappen",
     "iets anders",
     "not important",
-    "no idea",
     "something else",
+)
+
+# "I don't know" → productive struggle (scaffold), NOT full lecture
+STUCK_PHRASES = (
+    "geen idee",
+    "geen idd",
+    "weet ik niet",
+    "weet het niet",
+    "ik weet het niet",
+    "no idea",
+    "don't know",
+    "i don't know",
+    "idk",
+    "geen flauw idee",
 )
 
 # Explicit "teach me / explain" → full teach (policy + session flags)

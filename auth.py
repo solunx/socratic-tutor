@@ -43,13 +43,21 @@ def _ensure_data_dir() -> None:
 def get_secret() -> bytes:
     _ensure_data_dir()
     if SECRET_FILE.exists():
-        return SECRET_FILE.read_bytes().strip()
+        # Do NOT strip(): strip removes bytes 9/10/13/32 that can appear in random secrets
+        return SECRET_FILE.read_bytes()
     secret = secrets.token_bytes(32)
-    SECRET_FILE.write_bytes(secret)
     try:
-        SECRET_FILE.chmod(0o600)
-    except OSError:
-        pass
+        fd = os.open(str(SECRET_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(secret)
+    except FileExistsError:
+        return SECRET_FILE.read_bytes()
+    except Exception:
+        SECRET_FILE.write_bytes(secret)
+        try:
+            SECRET_FILE.chmod(0o600)
+        except OSError:
+            pass
     return secret
 
 

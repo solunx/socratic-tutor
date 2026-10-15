@@ -230,22 +230,19 @@ def extract_partial_routing_action(buffer):
     return None
 
 
+
 def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
     """
     Call Ollama native /api/chat.
-    Field name is "think" (not "thinking"). THINK=False disables CoT.
-    When STREAM is True, live-prints the learner-facing response field
-    as tokens arrive (JSON is still collected in full for parsing).
-
-    on_response_delta(text_so_far, delta): optional callback for web SSE.
-    live_print: override console printing (default = STREAM and no callback).
+    Returns (content: str, stats: dict).
+    stats includes streamed=True when the learner-facing response was live-printed
+    or pushed via on_response_delta (thread-safe; no function attributes).
     """
     think_val = _normalize_think(THINK)
     use_stream = STREAM if stream is None else bool(stream)
     if on_response_delta is not None:
         use_stream = True
     if live_print is None:
-        # Print to console only when streaming without an external callback (CLI)
         live_print = bool(use_stream) and on_response_delta is None
 
     payload = {
@@ -253,7 +250,6 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
         "messages": messages,
         "stream": use_stream,
         "think": think_val,
-        # Force structured JSON — cuts most parse failures / second-call retries
         "format": "json",
         "options": {
             "temperature": TEMPERATURE,
@@ -261,8 +257,20 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
         },
     }
 
-    ask_model.did_stream_response = False
+    did_stream = False
     t0 = datetime.now()
+
+    def _finish_stats(**extra):
+        s = dict(extra)
+        s.setdefault("model", MODEL_NAME)
+        s.setdefault("think_requested", think_val)
+        s.setdefault("streamed", did_stream)
+        try:
+            from metrics_lib import log_call_from_stats
+            log_call_from_stats(s)
+        except Exception:
+            pass
+        return s
 
     if not use_stream:
         response = requests.post(
@@ -285,27 +293,20 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
         prompt_n = data.get("prompt_eval_count") or 0
         total_s = (total_ns / 1e9) if total_ns else None
         eval_s = (eval_ns / 1e9) if eval_ns else None
-        ask_model.last_stats = {
-            "model": MODEL_NAME,
-            "think_requested": think_val,
-            "thinking_returned": bool(thinking_text),
-            "thinking_chars": len(thinking_text),
-            "eval_count": eval_n,
-            "prompt_eval_count": prompt_n,
-            "total_s": round(total_s, 2) if total_s is not None else None,
-            "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-            "eval_s": round(eval_s, 3) if eval_s is not None else None,
-            "load_s": round(load_ns / 1e9, 3) if load_ns else None,
-            "ttft_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-            "out_tok_per_s": round(eval_n / eval_s, 1) if eval_s and eval_n else None,
-            "streamed": False,
-        }
-        try:
-            from metrics_lib import log_call_from_stats
-            log_call_from_stats(ask_model.last_stats)
-        except Exception:
-            pass
-        return content
+        stats = _finish_stats(
+            thinking_returned=bool(thinking_text),
+            thinking_chars=len(thinking_text),
+            eval_count=eval_n,
+            prompt_eval_count=prompt_n,
+            total_s=round(total_s, 2) if total_s is not None else None,
+            prompt_eval_s=round(prompt_ns / 1e9, 3) if prompt_ns else None,
+            eval_s=round(eval_s, 3) if eval_s is not None else None,
+            load_s=round(load_ns / 1e9, 3) if load_ns else None,
+            ttft_s=round(prompt_ns / 1e9, 3) if prompt_ns else None,
+            out_tok_per_s=round(eval_n / eval_s, 1) if eval_s and eval_n else None,
+            streamed=False,
+        )
+        return content, stats
 
     # ---- streaming path ----
     response = requests.post(
@@ -359,14 +360,8 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
         if data.get("load_duration"):
             load_ns = data["load_duration"]
 
-        # Live-print ONLY for teaching turns (continue / clarify).
-        # list_subjects / switch / new_subject are handled by Python UI —
-        # streaming those responses causes double questions / double lists.
         buf = "".join(full_content)
         action = extract_partial_routing_action(buf)
-        streamable = action in (None, "continue", "clarify")
-        # Wait until routing.action is known before printing, so we never
-        # start a TUTOR block that must later be superseded by a resume banner.
         if action in ("continue", "clarify"):
             partial = extract_partial_response_field(buf)
             if partial is not None:
@@ -378,7 +373,7 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
                         divider()
                         print()
                     header_shown = True
-                    ask_model.did_stream_response = True
+                    did_stream = True
                 if len(partial) > printed_len:
                     delta = partial[printed_len:]
                     printed_len = len(partial)
@@ -389,15 +384,15 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
                             on_response_delta(partial, delta)
                         except Exception:
                             pass
+                        did_stream = True
         elif action in ("list_subjects", "switch", "new_subject"):
-            # Explicitly do not stream the response body
             pass
 
         if data.get("done"):
             break
 
     if header_shown and live_print:
-        print()  # end streamed body
+        print()
 
     content = "".join(full_content)
     thinking_text = "".join(thinking_parts)
@@ -407,55 +402,33 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
     elapsed = (datetime.now() - t0).total_seconds()
     total_s = (total_ns / 1e9) if total_ns else elapsed
     eval_s = (eval_ns / 1e9) if eval_ns else None
-    # Prefer wall-clock first token; fall back to prompt_eval_duration
-    if ttft_s is None and prompt_ns:
-        ttft_s = prompt_ns / 1e9
-    ask_model.last_stats = {
-        "model": MODEL_NAME,
-        "think_requested": think_val,
-        "thinking_returned": bool(thinking_text),
-        "thinking_chars": len(thinking_text),
-        "eval_count": eval_count,
-        "prompt_eval_count": prompt_eval_count,
-        "total_s": round(total_s, 2),
-        "prompt_eval_s": round(prompt_ns / 1e9, 3) if prompt_ns else None,
-        "eval_s": round(eval_s, 3) if eval_s is not None else None,
-        "load_s": round(load_ns / 1e9, 3) if load_ns else None,
-        "ttft_s": round(ttft_s, 3) if ttft_s is not None else None,
-        "out_tok_per_s": round(eval_count / eval_s, 1) if eval_s and eval_count else None,
-        "streamed": True,
-    }
-    try:
-        from metrics_lib import log_call_from_stats
-        log_call_from_stats(ask_model.last_stats)
-    except Exception:
-        pass
-    return content
-
-
-ask_model.last_stats = {}
-ask_model.did_stream_response = False
+    stats = _finish_stats(
+        thinking_returned=bool(thinking_text),
+        thinking_chars=len(thinking_text),
+        eval_count=eval_count,
+        prompt_eval_count=prompt_eval_count,
+        total_s=round(total_s, 2) if total_s is not None else None,
+        prompt_eval_s=round(prompt_ns / 1e9, 3) if prompt_ns else None,
+        eval_s=round(eval_s, 3) if eval_s is not None else None,
+        load_s=round(load_ns / 1e9, 3) if load_ns else None,
+        ttft_s=round(ttft_s, 3) if ttft_s is not None else (
+            round(prompt_ns / 1e9, 3) if prompt_ns else None
+        ),
+        out_tok_per_s=round(eval_count / eval_s, 1) if eval_s and eval_count else None,
+        streamed=did_stream,
+    )
+    return content, stats
 
 
 def ask_model_with_json_retry(messages, stream=None, on_response_delta=None):
     """
-    Call the model once. If the reply is not valid JSON,
-    do exactly one retry with a short reminder (non-streaming).
-    Returns (raw_text, parsed_dict_or_None).
-    Sets ask_model.last_json_retry when a second call was needed.
-    Preserves did_stream_response when the first call already live-printed
-    the same response (avoids duplicate TUTOR blocks in CLI).
-
-    stream / on_response_delta are passed through to ask_model (no global mutation).
+    Returns (raw: str, parsed: dict|None, stats: dict).
+    stats["streamed"] is True if the first call already live-printed the response.
     """
-    ask_model.last_json_retry = False
-    raw = ask_model(
-        messages,
-        stream=stream,
-        on_response_delta=on_response_delta,
-        live_print=(None if on_response_delta is None else False),
+    raw, stats = ask_model(
+        messages, stream=stream, on_response_delta=on_response_delta
     )
-    first_streamed = bool(getattr(ask_model, "did_stream_response", False))
+    first_streamed = bool(stats.get("streamed"))
     first_partial = ""
     try:
         first_partial = (extract_partial_response_field(raw) or "").strip()
@@ -466,14 +439,11 @@ def ask_model_with_json_retry(messages, stream=None, on_response_delta=None):
     if parsed is not None and isinstance(parsed, dict) and (
         "response" in parsed or "routing" in parsed
     ):
-        if getattr(ask_model, "last_stats", None) is not None:
-            ask_model.last_stats["json_retry"] = False
-            ask_model.last_stats["streamed"] = first_streamed
-        # Keep flag so CLI show_tutor does not reprint
-        ask_model.did_stream_response = first_streamed
-        return raw, parsed
+        stats = dict(stats)
+        stats["json_retry"] = False
+        stats["streamed"] = first_streamed
+        return raw, parsed, stats
 
-    # First call produced invalid/truncated JSON (often num_predict cut).
     if first_streamed:
         print()
         print(_c("(antwoord opnieuw opbouwen…)", GRAY))
@@ -486,37 +456,33 @@ def ask_model_with_json_retry(messages, stream=None, on_response_delta=None):
     ]
 
     try:
-        ask_model.last_json_retry = True
-        raw2 = ask_model(retry_messages, stream=False)
-        if getattr(ask_model, "last_stats", None) is not None:
-            ask_model.last_stats["json_retry"] = True
+        raw2, stats2 = ask_model(retry_messages, stream=False)
+        stats2 = dict(stats2)
+        stats2["json_retry"] = True
         parsed2 = extract_json_object(raw2)
         final_resp = ""
         if isinstance(parsed2, dict):
             final_resp = str(parsed2.get("response") or "").strip()
-        # If UI already showed the same (or very similar) text, skip second print
         if first_streamed and final_resp and first_partial:
             if final_resp == first_partial or final_resp[:100] == first_partial[:100]:
-                ask_model.did_stream_response = True
+                stats2["streamed"] = True
             else:
-                ask_model.did_stream_response = False
+                stats2["streamed"] = False
         else:
-            # Need show_tutor to print the final answer once
-            ask_model.did_stream_response = False
-        if getattr(ask_model, "last_stats", None) is not None:
-            ask_model.last_stats["streamed"] = bool(
-                getattr(ask_model, "did_stream_response", False)
-            )
+            stats2["streamed"] = False
         if parsed2 is not None:
-            return raw2, parsed2
-        return raw2, None
+            return raw2, parsed2, stats2
+        return raw2, None, stats2
     except Exception:
-        ask_model.did_stream_response = first_streamed
-        return raw, None
+        stats = dict(stats)
+        stats["streamed"] = first_streamed
+        stats["json_retry"] = True
+        return raw, None, stats
 
-def print_model_stats():
+
+def print_model_stats(stats=None):
     """Show whether CoT ran and how long the call took."""
-    s = getattr(ask_model, "last_stats", None) or {}
+    s = stats or {}
     if not s:
         return
     think_req = s.get("think_requested")
