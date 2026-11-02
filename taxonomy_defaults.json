@@ -1,0 +1,17 @@
+{
+  "zon": {
+    "quantum_tunneling": "nuclear_fusion",
+    "kernsamenstelling": "nuclear_fusion",
+    "sterke_kernkracht": "nuclear_fusion",
+    "hydrostatisch_evenwicht": "nuclear_fusion",
+    "energieniveaus": "kernsamenstelling",
+    "spectrale_lijnen": "energieniveaus",
+    "zwakke_kernkracht": "nuclear_fusion",
+    "pp_chain": "nuclear_fusion",
+    "coulomb_barriere": "quantum_tunneling"
+  },
+  "ai_agents": {
+    "tool_use": "agent",
+    "harness": "agent"
+  }
+}

@@ -187,6 +187,7 @@ Policy cases cover JSON shape, anti-repeat intent, resume retrieval, MC force, F
 - **Do not copy** external tutor repos wholesale; borrow *policies*, reimplement  
 - Prefer **measure then optimize** (metrics, prompt prefix, conversation cap)  
 - Learner should not manage FSRS/MC catalogues manually — background hygiene  
+- **Factual integrity:** under-claim over inventing; on learner correction, concede if they are right; no abandoned open gaps without bridge  
 - Safety: gateway stays on private network; no public port-forward
 
 ---
@@ -199,7 +200,7 @@ MIT (see `LICENSE` if present). Prior-art references and their licenses are list
 
 ## Status
 
-**v0.5.1** — multi-user web + CLI, lobby, per-subject threads, streaming, policy/FSRS/tree/MC hygiene, diagnostic intake, **strict per-user isolation** on save/load.
+**v0.5.5** — multi-user isolation + stricter Socratic pushback (productive struggle) + richer per-user event logs for debugging tester sessions.
 
 See `docs/VISION.md` for the original goals and how the system evolved.
 

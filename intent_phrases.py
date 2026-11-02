@@ -33,6 +33,40 @@ REPEAT_ADVANCE_PHRASES = (
     "just did that",
 )
 
+# Tutor is re-asking what the learner already answered (feedback on the tutor)
+REPETITION_FEEDBACK_PHRASES = (
+    "dat heb ik toch net",
+    "dat heb ik net gezegd",
+    "dat zei ik net",
+    "dat zei ik toch",
+    "heb ik toch net",
+    "heb ik net gezegd",
+    "waarom stel je exact dezelfde",
+    "waarom dezelfde vraag",
+    "dezelfde vraag",
+    "exact dezelfde vraag",
+    "zelfde vraag",
+    "je stelt opnieuw",
+    "opnieuw dezelfde",
+    "al behandeld",
+    "al beantwoord",
+    "hadden we daarnet",
+    "hadden we al",
+    "daarnet ook al",
+    "toch ook al behandeld",
+    "toch ook al beantwoord",
+    "already said that",
+    "i just said that",
+    "i already said",
+    "already covered",
+    "already answered",
+    "we already",
+    "you just asked",
+    "same question again",
+    "why the same question",
+    "why are you asking the same",
+)
+
 # Skip aggressive resume / force progress
 SKIP_RESUME_PHRASES = (
     "niet belangrijk",
@@ -59,6 +93,49 @@ STUCK_PHRASES = (
     "i don't know",
     "idk",
     "geen flauw idee",
+    "kan ik niet",
+    "dat kan ik niet",
+    "ik kan het niet",
+    "i can't",
+    "i cannot",
+)
+
+
+# Learner says the tutor is factually wrong
+CORRECTION_PHRASES = (
+    "je bent fout",
+    "je hebt ongelijk",
+    "dat klopt niet",
+    "dat is fout",
+    "dat is niet waar",
+    "niet juist",
+    "verkeerd",
+    "you are wrong",
+    "you're wrong",
+    "that is wrong",
+    "that's wrong",
+    "that's not true",
+    "incorrect",
+)
+
+# Learner forms their own insight or sharp side-question → RECOGNISE, park old quiz
+INSIGHT_PHRASES = (
+    "aaah",
+    "ahh wacht",
+    "ah wacht",
+    "oh wacht",
+    "wacht dus",
+    "dus eigenlijk",
+    "dus als",
+    "maar dan",
+    "maar hoe",
+    "wait so",
+    "wait, so",
+    "oh wait",
+    "so then",
+    "but then how",
+    "does that mean",
+    "betekent dat",
 )
 
 # Explicit "teach me / explain" → full teach (policy + session flags)

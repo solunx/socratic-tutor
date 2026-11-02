@@ -98,6 +98,10 @@
     .bubble .who { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
     .bubble .meta { font-size: 0.7rem; color: var(--muted); margin-top: 6px; }
     .bubble.streaming::after { content: "|"; animation: blink 1s step-end infinite; margin-left: 1px; }
+    .sources-block { margin-top: 0.65rem; padding-top: 0.5rem; border-top: 1px solid rgba(255,255,255,0.12);
+      font-size: 0.78rem; opacity: 0.85; line-height: 1.35; }
+    .sources-block a { color: #7eb8ff; word-break: break-all; }
+    .sources-block .src-kind { opacity: 0.7; }
     @keyframes blink { 50% { opacity: 0; } }
     #composer {
       display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
@@ -462,9 +466,58 @@
       }
     }
 
+
+    function renderSources(bubble, sources) {
+      if (!bubble || !Array.isArray(sources) || !sources.length) return;
+      let box = bubble.querySelector(".sources-block");
+      if (!box) {
+        box = document.createElement("div");
+        box.className = "sources-block";
+        bubble.appendChild(box);
+      }
+      box.innerHTML = "";
+      const title = document.createElement("div");
+      title.textContent = "Bronnen";
+      title.style.fontWeight = "600";
+      title.style.marginBottom = "0.25rem";
+      box.appendChild(title);
+      sources.forEach((s) => {
+        const row = document.createElement("div");
+        const kind = (s.kind || "bron");
+        const label = s.title || s.source || "bron";
+        const kindEl = document.createElement("span");
+        kindEl.className = "src-kind";
+        kindEl.textContent = "[" + kind + "] ";
+        row.appendChild(kindEl);
+        if (s.url) {
+          const a = document.createElement("a");
+          a.href = s.url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.textContent = label;
+          row.appendChild(a);
+        } else {
+          const span = document.createElement("span");
+          span.textContent = label + (s.source ? " (" + s.source + ")" : "");
+          row.appendChild(span);
+        }
+        box.appendChild(row);
+      });
+    }
+
     function handleResult(data, opts) {
       opts = opts || {};
       if (!assertUser(data, "turn")) return;
+      // Always surface server/model errors (even after streaming tokens)
+      if (data && data.ok === false && data.response) {
+        // Never dump raw model JSON (truncated parse failures looked like "routing errors")
+        let err = String(data.response || "");
+        if (err.trimStart().startsWith("{") || err.indexOf('"routing"') >= 0) {
+          err = "Antwoord kon niet worden verwerkt (model-output te lang of ongeldig JSON). Probeer hetzelfde bericht opnieuw.";
+        }
+        if (err.length > 280) err = err.slice(0, 277) + "…";
+        addBubble("system", "⚠ " + err);
+      }
       // Cookie may change if another tab logged in as someone else
       if (data.user_id) {
         const badge = document.getElementById("user-badge");
@@ -547,8 +600,14 @@
         return;
       }
       if (!opts.streamedBody && data.response) {
-        if (!textsRoughlyEqual(lastBubbleText("tutor"), data.response)) {
-          addBubble("tutor", data.response, formatStats(data.stats));
+        let show = String(data.response || "");
+        if (Array.isArray(data.sources) && data.sources.length) {
+          const cut = show.search(/\n—\s*\nBronnen:/);
+          if (cut >= 0) show = show.slice(0, cut).trimEnd();
+        }
+        if (!textsRoughlyEqual(lastBubbleText("tutor"), show)) {
+          const b = addBubble("tutor", show, formatStats(data.stats));
+          renderSources(b, data.sources);
         }
       } else if (opts.streamedBody && data.stats) {
         const bubbles = log.querySelectorAll(".bubble.tutor");
@@ -559,6 +618,7 @@
           m.textContent = formatStats(data.stats);
           last.appendChild(m);
         }
+        if (last) renderSources(last, data.sources);
       }
     }
 
@@ -650,8 +710,28 @@
 
         if (finalData) {
           handleResult(finalData, { streamedBody: streamed && !isCmd });
-          if (streamed && finalData.response && bodyEl && !bodyEl.textContent.trim()) {
-            bodyEl.textContent = finalData.response;
+          // Prefer final response (may include Python-owned Bronnen footer not present in stream tokens)
+          if (streamed && finalData.response && bodyEl) {
+            const finalTxt = String(finalData.response || "");
+            const live = (bodyEl.textContent || "").trim();
+            if (!live || finalTxt.length > live.length + 5 || finalTxt.indexOf("Bronnen:") >= 0) {
+              // Strip plain-text footer if we also render structured sources
+              let show = finalTxt;
+              if (Array.isArray(finalData.sources) && finalData.sources.length) {
+                const idx = show.indexOf("\n—\nBronnen:");
+                if (idx >= 0) show = show.slice(0, idx).trimEnd();
+                const idx2 = show.indexOf("\nBronnen:");
+                if (idx2 >= 0 && show.indexOf("—") >= Math.max(0, idx2 - 5)) {
+                  /* keep body without duplicate footer when structured block exists */
+                }
+                const cut = show.search(/\n—\s*\nBronnen:/);
+                if (cut >= 0) show = show.slice(0, cut).trimEnd();
+              }
+              bodyEl.textContent = show;
+              renderSources(tutorBubble, finalData.sources);
+            }
+          } else if (finalData.sources && tutorBubble) {
+            renderSources(tutorBubble, finalData.sources);
           }
           statusEl.textContent = subjectTitle(finalData.thread_id) || finalData.thread_id || "Klaar";
         }

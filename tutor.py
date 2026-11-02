@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-__version__ = "0.5.0"
+__version__ = "0.5.7"
 
 import json
 import fcntl
@@ -101,7 +101,7 @@ STREAM = True
 
 # Maximum amount of conversation kept in the active context.
 # This prevents the prompt from growing forever.
-MAX_CONVERSATION_MESSAGES = 12  # keep prompt lean for speed
+MAX_CONVERSATION_MESSAGES = 6  # shorter window → less self-copy of prior tutor turns
 
 # Session target. The tutor may continue longer if useful.
 DEFAULT_SESSION_MINUTES = 30
@@ -111,26 +111,20 @@ MAX_HISTORY_ENTRIES = 40          # session breadcrumbs only
 MAX_EVIDENCE_PER_CONCEPT = 8      # recent evidence windows
 MAX_MISCONCEPTIONS_PER_CONCEPT = 8
 
-CONCEPT_PARENT_DEFAULTS = {
-    "zon": {
-        "quantum_tunneling": "nuclear_fusion",
-        "kernsamenstelling": "nuclear_fusion",
-        "sterke_kernkracht": "nuclear_fusion",
-        "hydrostatisch_evenwicht": "nuclear_fusion",
-        "energieniveaus": "kernsamenstelling",
-        "spectrale_lijnen": "energieniveaus",
-        "zwakke_kernkracht": "nuclear_fusion",
-        "pp_chain": "nuclear_fusion",
-        "coulomb_barriere": "quantum_tunneling",
-    },
-    "ai_agents": {
-        "tool_use": "agent",
-        "harness": "agent",
-    },
-}
+def _load_concept_parent_defaults() -> dict:
+    """Subject-specific parent links live in taxonomy_defaults.json (data, not code)."""
+    path = Path(__file__).resolve().parent / "taxonomy_defaults.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
-MAX_OUTPUT_TOKENS = 700           # phase-3: room for full JSON (response+routing+assessment+session)
+CONCEPT_PARENT_DEFAULTS = _load_concept_parent_defaults()
+
+
+MAX_OUTPUT_TOKENS = 1400          # phase A: response + routing + assessment + gap_card + session
 
 
 # --- LLM client (see llm.py) ---
@@ -2319,6 +2313,243 @@ def _auto_resolve_misconceptions(concept, assessment, verdict=None):
     return changed
 
 
+# Phase A/A2 — learner_signal + gap card (learning plan, not truth source)
+LEARNER_SIGNALS = (
+    "correct",
+    "partial",
+    "stuck",
+    "challenges_tutor",
+    "confused_by_tutor",
+)
+GAP_CARD_STATUSES = (
+    "model_only",
+    "source_backed",
+    "disputed",
+    "human_checked",
+)
+# Pedagogical probe shape (domain-agnostic). After the learner demonstrates a
+# point, policy rotates away from pure "restate the key".
+PROBE_TYPES = ("restate", "missing_piece", "apply", "contrast", "predict")
+GAP_PROGRESS = ("open", "partial_ok", "demonstrated", "closed")
+
+
+def normalize_learner_signal(raw) -> str | None:
+    """Map free-form model output to a canonical learner_signal enum."""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "ok": "correct",
+        "true": "correct",
+        "right": "correct",
+        "wrong": "stuck",  # not a signal we use; treat as struggle
+        "incorrect": "stuck",
+        "dont_know": "stuck",
+        "no_idea": "stuck",
+        "challenge": "challenges_tutor",
+        "challenges": "challenges_tutor",
+        "correction": "challenges_tutor",
+        "confused": "confused_by_tutor",
+        "confusion": "confused_by_tutor",
+        "repetition": "correct",  # treated via phrase path; not a public signal
+        "repetition_feedback": "correct",
+    }
+    if s in aliases:
+        s = aliases[s]
+    if s in LEARNER_SIGNALS:
+        return s
+    return None
+
+
+def next_probe_type(current: str | None) -> str:
+    """Rotate probe shape forward (restate → apply → contrast → predict → …)."""
+    order = ["restate", "apply", "contrast", "predict"]
+    cur = (current or "restate").strip().lower()
+    if cur == "missing_piece":
+        return "apply"
+    if cur not in order:
+        return "apply"
+    i = order.index(cur)
+    return order[min(i + 1, len(order) - 1)]
+
+
+def mark_gap_progress(active, progress: str, *, probe_type: str | None = None) -> None:
+    """Update open thread learning progress (pedagogy ≠ knowledge verification)."""
+    if progress not in GAP_PROGRESS:
+        return
+    ot = get_open_thread(active)
+    if not ot:
+        return
+    ot["progress"] = progress
+    if probe_type and probe_type in PROBE_TYPES:
+        ot["last_probe_type"] = probe_type
+    gc = ot.get("gap_card")
+    if isinstance(gc, dict):
+        gc["progress"] = progress
+        if probe_type and probe_type in PROBE_TYPES:
+            gc["last_probe_type"] = probe_type
+
+
+def apply_learner_signal(state, assessment) -> str | None:
+    """Apply assessment.learner_signal → active_session flags for the *next* policy turn.
+
+    Domain-agnostic. Phrase lists remain a backup before the LLM responds;
+    this is the structured signal after the model classified the learner turn.
+
+    Phase A2: partial does NOT automatically force_scaffold (that caused echo
+    restate loops). Correct / solid partial → must_advance + new probe type.
+    """
+    if not isinstance(assessment, dict):
+        return None
+    sig = normalize_learner_signal(assessment.get("learner_signal"))
+    if not sig:
+        return None
+    active = state.setdefault("active_session", {})
+    if not isinstance(active, dict):
+        return None
+    active["last_learner_signal"] = sig
+    ot = get_open_thread(active)
+    last_probe = None
+    if ot:
+        last_probe = ot.get("last_probe_type")
+        gc = ot.get("gap_card") if isinstance(ot.get("gap_card"), dict) else {}
+        last_probe = last_probe or (gc or {}).get("last_probe_type") or "restate"
+
+    # Reset soft flags; signal sets what this turn means for the next decision
+    if sig == "stuck":
+        active["stuck_signal"] = True
+        active["force_scaffold"] = True
+        active["must_advance"] = False
+        active["confused_by_tutor"] = False
+        active["partial_missing"] = False
+        active["prefer_probe_type"] = "missing_piece"
+    elif sig == "partial":
+        # Mostly right, one gap left — NOT a full stuck scaffold / restate loop
+        active["stuck_signal"] = False
+        active["force_scaffold"] = False
+        active["confused_by_tutor"] = False
+        active["partial_missing"] = True
+        # If we already restated once, rotate to apply/contrast instead of echo
+        if last_probe in ("restate", None, "") or (ot or {}).get("progress") in (
+            "partial_ok",
+            "demonstrated",
+        ):
+            active["must_advance"] = True
+            active["prefer_probe_type"] = next_probe_type(last_probe or "restate")
+        else:
+            active["must_advance"] = False
+            active["prefer_probe_type"] = "missing_piece"
+        if ot:
+            mark_gap_progress(active, "partial_ok", probe_type=last_probe or "restate")
+    elif sig == "challenges_tutor":
+        active["learner_correction"] = True
+        active["force_scaffold"] = True
+        active["stuck_signal"] = True
+        active["must_advance"] = False
+        active["confused_by_tutor"] = False
+        active["partial_missing"] = False
+        # Epistemic: mark gap card disputed if present
+        if ot and isinstance(ot.get("gap_card"), dict):
+            ot["gap_card"]["status"] = "disputed"
+    elif sig == "confused_by_tutor":
+        active["confused_by_tutor"] = True
+        active["stuck_signal"] = True
+        active["force_scaffold"] = True
+        active["must_advance"] = False
+        active["partial_missing"] = False
+        active["prefer_probe_type"] = "missing_piece"
+    elif sig == "correct":
+        active["stuck_signal"] = False
+        active["force_scaffold"] = False
+        active["confused_by_tutor"] = False
+        active["must_advance"] = True
+        active["partial_missing"] = False
+        active["prefer_probe_type"] = next_probe_type(last_probe or "restate")
+        mark_gap_progress(active, "demonstrated", probe_type=active["prefer_probe_type"])
+    return sig
+
+
+def empty_gap_card() -> dict:
+    return {
+        "target": None,
+        "key": None,
+        "expected_answer": None,
+        "scaffold_ladder": [],
+        "status": "model_only",
+        "sources": [],
+        "retracted_claims": [],
+        "progress": "open",
+        "last_probe_type": "restate",
+    }
+
+
+def merge_gap_card_from_assessment(state, assessment) -> dict | None:
+    """Merge optional assessment.gap_card onto the current open thread.
+
+    The card is a *learning plan*, not a truth oracle. Default status is
+    model_only (LLM proposal). Later verification/RAG may set source_backed.
+    """
+    if not isinstance(assessment, dict):
+        return None
+    raw = assessment.get("gap_card")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    active = state.get("active_session") or {}
+    ot = get_open_thread(active)
+    if not ot:
+        return None
+    card = ot.get("gap_card") if isinstance(ot.get("gap_card"), dict) else empty_gap_card()
+    for field in ("target", "key", "expected_answer"):
+        val = raw.get(field)
+        if val is not None and str(val).strip():
+            card[field] = str(val).strip()[:400]
+    ladder = raw.get("scaffold_ladder") or raw.get("ladder")
+    if isinstance(ladder, list) and ladder:
+        card["scaffold_ladder"] = [str(x).strip()[:200] for x in ladder if str(x).strip()][:6]
+    st = str(raw.get("status") or card.get("status") or "model_only").strip().lower()
+    # Model must not self-promote to verified/source_backed — only Python/verifier may
+    if st in ("source_backed", "human_checked", "verified"):
+        st = card.get("status") or "model_only"
+        if st not in GAP_CARD_STATUSES:
+            st = "model_only"
+    elif st not in GAP_CARD_STATUSES:
+        st = "model_only"
+    if active.get("learner_correction") or normalize_learner_signal(assessment.get("learner_signal")) == "challenges_tutor":
+        st = "disputed"
+    card["status"] = st
+    # sources only appended when already present (verifier later); ignore model-invented URLs
+    if isinstance(card.get("sources"), list) and not card["sources"]:
+        card["sources"] = []
+    retracted = raw.get("retracted_claims")
+    if isinstance(retracted, list) and retracted:
+        prev = list(card.get("retracted_claims") or [])
+        for r in retracted:
+            t = str(r).strip()[:240]
+            if t and t not in prev:
+                prev.append(t)
+        card["retracted_claims"] = prev[-12:]
+    # Preserve pedagogical progress fields (learning state ≠ knowledge status)
+    if isinstance(ot.get("gap_card"), dict):
+        prev = ot["gap_card"]
+        if prev.get("progress") and not card.get("progress"):
+            card["progress"] = prev.get("progress")
+        if prev.get("last_probe_type") and not card.get("last_probe_type"):
+            card["last_probe_type"] = prev.get("last_probe_type")
+    if raw.get("progress") in GAP_PROGRESS:
+        # Model may propose progress; only accept non-closed upgrades from model
+        prop = raw.get("progress")
+        if prop in ("open", "partial_ok", "demonstrated"):
+            card["progress"] = prop
+    if str(raw.get("last_probe_type") or "").lower() in PROBE_TYPES:
+        card["last_probe_type"] = str(raw.get("last_probe_type")).lower()
+    ot["gap_card"] = card
+    if card.get("progress"):
+        ot["progress"] = card["progress"]
+    if card.get("last_probe_type"):
+        ot["last_probe_type"] = card["last_probe_type"]
+    return card
+
+
 def apply_assessment(
     state,
     assessment
@@ -2330,23 +2561,62 @@ def apply_assessment(
     ):
         return None
 
+    # Phase A/A2: structured learner signal + gap plan (even if concept id is missing)
+    apply_learner_signal(state, assessment)
+    merge_gap_card_from_assessment(state, assessment)
+
     # Immediate correctness signal (pedagogy: feedback close to the error)
     verdict = str(assessment.get("verdict") or "").strip().lower()
     if verdict in ("incorrect", "wrong", "false"):
         active = state.get("active_session") or {}
         active["last_verdict"] = "incorrect"
+        active["correct_streak"] = 0
         # Prefer misconception remediation next turn
         active["must_advance"] = False
         active["pending_verdict_feedback"] = True
+        # Epistemic: under model_only, do not treat verdict alone as hard rejection
+        ot = get_open_thread(active)
+        gc = (ot or {}).get("gap_card") if ot else None
+        if isinstance(gc, dict) and gc.get("status") == "model_only":
+            active["soft_incorrect"] = True
     elif verdict in ("correct", "true", "ok", "partial"):
         active = state.get("active_session") or {}
         active["last_verdict"] = verdict if verdict != "ok" else "correct"
+        # consecutive CLEAN corrects on the focus concept (partial resets): drives focus rotation
+        active["correct_streak"] = (int(active.get("correct_streak") or 0) + 1
+                                    if verdict in ("correct", "true", "ok") else 0)
         active["pending_verdict_feedback"] = False
+        active["soft_incorrect"] = False
         if verdict in ("correct", "true", "ok"):
+            # Progress BEFORE close — mark_gap_progress needs an open thread
+            mark_gap_progress(active, "demonstrated")
             cur = get_open_thread(active)
             if cur:
+                est = list(active.get("established_points") or [])
+                # Prefer what the LEARNER showed (evidence / their words), not the
+                # tutor's expected_answer key (that caused echo of tutor keys).
+                evidence = str(assessment.get("evidence") or "").strip()
+                tip = None
+                if evidence and len(evidence) > 12:
+                    tip = ("Learner showed: " + evidence)[:140]
+                if not tip:
+                    tip = ("Answered: " + str(cur.get("q") or "").strip()[:120])
+                if tip and tip not in est:
+                    est.append(tip)
+                    active["established_points"] = est[-8:]
+                banned = list(active.get("banned_questions") or [])
+                if cur.get("q") and cur["q"] not in banned:
+                    banned.append(str(cur["q"])[:240])
+                    active["banned_questions"] = banned[-8:]
+                # Clear reask counter for this fingerprint
+                active["reask_count"] = 0
                 cur["status"] = "closed"
                 cur["closed_reason"] = "verdict_correct"
+                cur["progress"] = "demonstrated"
+                if isinstance(cur.get("gap_card"), dict):
+                    cur["gap_card"]["progress"] = "demonstrated"
+        elif verdict == "partial":
+            mark_gap_progress(active, "partial_ok")
 
     raw_subject = assessment.get("subject", "general")
     raw_concept = assessment.get("concept")
@@ -2550,14 +2820,21 @@ def apply_assessment(
         datetime.now().isoformat()
     )
 
-    concept["review_count"] = (
-        concept.get(
-            "review_count",
-            0
-        ) + 1
-    )
-
-    concept["next_review"] = calculate_review_date(concept, assessment)
+    # FSRS is a SPACING model: grade a concept at most once per session, and never
+    # on a turn whose correction was not confirmed (assessment["_skip_fsrs"]).
+    _act = state.get("active_session") or {}
+    _sess = str(_act.get("started_at") or "")
+    _already = bool(_sess) and concept.get("fsrs_session") == _sess
+    if not assessment.get("_skip_fsrs") and not _already:
+        concept["review_count"] = (
+            concept.get(
+                "review_count",
+                0
+            ) + 1
+        )
+        concept["next_review"] = calculate_review_date(concept, assessment)
+        if _sess:
+            concept["fsrs_session"] = _sess
 
     _auto_resolve_misconceptions(concept, assessment, verdict=verdict)
     # Periodic hygiene (dedupe + age) after every scored turn
@@ -2601,9 +2878,12 @@ def apply_assessment(
         ]["current_activity"] = activity
         pass  # mc_force_count set only on forced high-MC policy returns
 
-    state[
-        "active_session"
-    ]["current_concept_id"] = concept_id
+    # Focus rotation is decided in Python (policy). The assessment still scores the concept the
+    # learner just answered about, but it must not silently move the focus back for the next turn.
+    if state["active_session"].pop("rotation_pending", False):
+        pass
+    else:
+        state["active_session"]["current_concept_id"] = concept_id
 
     state[
         "active_session"
@@ -2648,28 +2928,106 @@ def apply_assessment(
 # ask_model → llm.py
 
 def extract_question_from_text(text):
-    """Best-effort: last interrogative sentence, else truncated response."""
+    """Extract only the last interrogative sentence — not the whole tutor turn.
+
+    Previously a single trailing '?' returned the entire paragraph, which bloated
+    recent_questions and made anti-repeat match on shared filler words.
+    """
     if not text:
         return None
     text = str(text).strip()
-    # Prefer last sentence with ?
-    parts = re.split(r"(?<=[?؟])\s+", text)
-    for p in reversed(parts):
-        p = p.strip()
-        if "?" in p or "？" in p:
-            return p[:300]
-    # Fallback: last sentence
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    if sentences:
-        return sentences[-1].strip()[:300]
-    return text[:200] or None
+    # Split into sentences; take the last one that contains ?
+    sentences = re.split(r"(?<=[.!?؟])\s+", text)
+    for s in reversed(sentences):
+        s = s.strip()
+        if "?" in s or "？" in s or "؟" in s:
+            # Drop leading acknowledgement clauses before the actual question
+            # e.g. drop leading acknowledgement before the real question
+            if ". " in s and s.rstrip().endswith("?"):
+                parts = s.split(". ")
+                for part in reversed(parts):
+                    part = part.strip()
+                    if "?" in part:
+                        return part[:300]
+            return s[:300]
+    return None  # no question → do not register a fake "question"
 
 
-def questions_similar(a, b, threshold=0.55):
+def response_looks_like_echo_teach(response_text: str) -> bool:
+    """Heuristic: tutor asserted content, then asked to restate that content.
+
+    Used as a soft signal (must_advance next turn) — not a hard block.
+    Domain-agnostic: content-token overlap between pre-question body and the
+    final question. Also flags explicit "explain in one sentence why…" cues
+    after a substantial body.
+    """
+    if not response_text or "?" not in str(response_text):
+        return False
+    text = str(response_text).strip()
+    q = extract_question_from_text(text)
+    if not q or len(q) < 12:
+        return False
+    # Body = everything before the final question sentence
+    idx = text.rfind(q)
+    body = text[:idx].strip() if idx > 0 else ""
+    if len(body) < 40:
+        return False
+
+    q_low = q.lower()
+    # Explicit restate cues after a lecture body
+    restate_cues = (
+        "in één zin",
+        "in een zin",
+        "in one sentence",
+        "in your own words",
+        "in eigen woorden",
+        "kun je uitleggen waarom",
+        "can you explain why",
+        "waarom is dat",
+        "waarom die",
+    )
+    if any(c in q_low for c in restate_cues) and len(body) >= 60:
+        return True
+
+    # Strip instruction words so overlap measures conceptual content only
+    _q_meta = frozenset(
+        "kun kunt kan kunnen zin één een uitleggen explain why waarom "
+        "zeggen noemen beschrijf describe eigen woorden words sentence "
+        "kort korte briefly".split()
+    )
+
+    def content_toks(s, extra_stop=frozenset()):
+        raw = re.findall(r"[a-z0-9à-ÿ]{3,}", str(s).lower())
+        return set(t for t in raw if t not in _SIM_STOP and t not in extra_stop)
+
+    tb, tq = content_toks(body), content_toks(q, _q_meta)
+    if not tb or not tq or len(tq) < 2:
+        return False
+    overlap = len(tb & tq) / max(len(tq), 1)
+    # High overlap → question mostly recycles words from the preceding lecture
+    return overlap >= 0.45
+
+
+# Function / glue words that inflate token-overlap similarity in NL/EN
+_SIM_STOP = frozenset(
+    """
+    the and for that with you your what which when where why how does do did
+    is are was were will can could would should may might this these those
+    from into onto about under over than then them they their there have has
+    had been being not but also just only very more most some any each
+    een het de van voor dat die dit deze met een een naar bij zijn was wordt
+    worden kan kunt kunnen zou zullen wat welke wanneer waar waarom hoe als
+    dan nog even nu wel niet of en of maar ook al eens iets iemand
+    verantwoordelijk proces gebeurt laten kijken zeggen noemen precies juist goed
+    """.split()
+)
+
+
+def questions_similar(a, b, threshold=0.62):
     """Token-overlap similarity for anti-repeat (Dutch/English).
 
-    Uses intersection / min(|a|,|b|) so a short rephrase of a longer
-    question still counts as a repeat.
+    Ignores high-frequency glue words so unrelated questions do not match on
+    'als/dan/een/wat'. Uses intersection / min(|a|,|b|) on content tokens.
     """
     if not a or not b:
         return False
@@ -2679,12 +3037,20 @@ def questions_similar(a, b, threshold=0.55):
     for x in ("?", "؟", "！", "!"):
         a = a.replace(x, " ")
         b = b.replace(x, " ")
-    def toks(s):
-        return set(re.findall(r"[a-z0-9à-ÿ]{3,}", s))
-    ta, tb = toks(a), toks(b)
+
+    def content_toks(s):
+        raw = re.findall(r"[a-z0-9à-ÿ]{3,}", s)
+        return set(t for t in raw if t not in _SIM_STOP)
+
+    ta, tb = content_toks(a), content_toks(b)
     if not ta or not tb:
         return False
-    return (len(ta & tb) / min(len(ta), len(tb))) >= threshold
+    # Exact content overlap
+    inter = len(ta & tb)
+    if inter == 0:
+        return False
+    score = inter / min(len(ta), len(tb))
+    return score >= threshold
 
 
 
@@ -2719,27 +3085,42 @@ def close_open_threads_matching(active, question_text, reason="answered"):
     return n
 
 
-def push_or_bump_open_thread(active, question_text, activity=None):
-    """Register tutor question as open thread; bump tries if same thread."""
+def push_or_bump_open_thread(active, question_text, activity=None, *, allow_new=True):
+    """Register tutor question as open pedagogical gap.
+
+    Pedagogy: at most ONE unresolved gap. While a gap is open/scaffolded,
+    do NOT replace it with a different question (that abandons the learner).
+    Only bump tries on the existing gap until it is closed (resolved / full teach).
+    """
     if not question_text:
-        return
+        return None
     threads = _ensure_open_threads(active)
     q = str(question_text).strip()[:280]
-    # Same as current open → bump tries
     cur = get_open_thread(active)
-    if cur and questions_similar(cur.get("q") or "", q, threshold=0.5):
+    if cur:
+        same = questions_similar(cur.get("q") or "", q, threshold=0.45)
+        if same:
+            cur["tries"] = int(cur.get("tries") or 0) + 1
+            if activity:
+                cur["activity"] = activity
+            return cur
+        # Different wording from the model — still the same unresolved gap.
+        # Keep original q so policy/prompt keep targeting it; bump tries.
+        if not allow_new:
+            cur["tries"] = int(cur.get("tries") or 0) + 1
+            cur["status"] = "scaffolded"
+            cur["last_alt_q"] = q[:200]
+            if activity:
+                cur["activity"] = activity
+            return cur
+        # Default: also lock — never supersede an open gap with a new question
         cur["tries"] = int(cur.get("tries") or 0) + 1
+        cur["status"] = "scaffolded"
+        cur["last_alt_q"] = q[:200]
         if activity:
             cur["activity"] = activity
         return cur
-    # Close older opens if we clearly moved to a new distinct question
-    # (keep max 2 open — force focus)
-    opens = [t for t in threads if t.get("status") in ("open", "scaffolded", "hinted")]
-    if len(opens) >= 2:
-        # close the oldest open
-        opens[0]["status"] = "closed"
-        opens[0]["closed_reason"] = "superseded"
-    # Unique ids even after capping list (len alone collides → all "t9")
+    # No open gap yet — start one
     max_n = 0
     for t in threads:
         tid = str(t.get("id") or "")
@@ -2753,16 +3134,25 @@ def push_or_bump_open_thread(active, question_text, activity=None):
         "activity": activity or active.get("current_activity"),
     }
     threads.append(entry)
-    active["open_threads"] = threads[-8:]  # cap history
+    active["open_threads"] = threads[-8:]
     return entry
 
 
 def mark_thread_scaffolded(active):
+    """Mark current open gap as scaffolded. Do NOT increment tries here —
+    push_or_bump_open_thread already bumps once per tutor turn (avoid double-count)."""
     cur = get_open_thread(active)
     if cur:
         cur["status"] = "scaffolded"
-        cur["tries"] = int(cur.get("tries") or 0) + 1
     return cur
+
+
+TUTOR_ASSERTED = "Tutor-asserted (unverified): "
+
+
+def is_learner_point(x):
+    """True only for points that record what the LEARNER demonstrated ("Learner showed: ...", "Answered: ...")."""
+    return str(x or "").strip().lower().startswith(("learner showed", "answered:", "learner:"))
 
 
 def update_session_memory(state, session_info, response_text):
@@ -2780,24 +3170,79 @@ def update_session_memory(state, session_info, response_text):
     else:
         last_q = extract_question_from_text(response_text)
 
+    # Soft detect: explain-then-restate in the same reply → force advance next turn
+    if response_text and response_looks_like_echo_teach(response_text):
+        active["must_advance"] = True
+        active["echo_teach_flag"] = True
+        active["prefer_probe_type"] = "apply"
+
     if last_q:
         recent = list(active.get("recent_questions") or [])
-        is_repeat = any(questions_similar(last_q, prev) for prev in recent[-5:])
-        if is_repeat:
+        ot = get_open_thread(active)
+        open_q = (ot.get("q") if ot else None) or ""
+        similar_to_open = bool(open_q and questions_similar(last_q, open_q, threshold=0.4))
+        is_repeat = any(questions_similar(last_q, prev, threshold=0.5) for prev in recent[-5:])
+        stuck_turn = bool(
+            active.get("_was_stuck_this_turn")
+            or active.get("stuck_signal")
+            or active.get("force_scaffold")
+        )
+        progress = (ot or {}).get("progress") if ot else None
+
+        # Repeating a recent question is always pressure to advance — even if an
+        # open_thread still points at the same wording (that was the loop bug).
+        # Max ONE rephrase of the same fingerprint when not stuck; then advance.
+        if is_repeat and not stuck_turn:
             active["must_advance"] = True
             active["repeat_streak"] = int(active.get("repeat_streak") or 0) + 1
+            active["reask_count"] = int(active.get("reask_count") or 0) + 1
+            if ot and progress in ("partial_ok", "demonstrated"):
+                ot["status"] = "closed"
+                ot["closed_reason"] = "repeat_after_demonstrated"
+                mark_gap_progress(active, "closed")
+            # Second identical ask → hard close of open gap
+            if int(active.get("reask_count") or 0) >= 2 and ot and ot.get("status") != "closed":
+                ot["status"] = "closed"
+                ot["closed_reason"] = "max_reask"
+                mark_gap_progress(active, "closed")
+        elif is_repeat and stuck_turn and similar_to_open:
+            # Intentional scaffold rephrase of the same stuck gap — allowed once
+            active["repeat_streak"] = int(active.get("repeat_streak") or 0) + 1
+            active["reask_count"] = int(active.get("reask_count") or 0) + 1
+            if int(active.get("repeat_streak") or 0) >= 2:
+                active["must_advance"] = True
         else:
             active["repeat_streak"] = 0
+            if not is_repeat:
+                active["reask_count"] = 0
 
         active["last_tutor_question"] = last_q
-        if not recent or not questions_similar(recent[-1], last_q):
+        if not recent or not questions_similar(recent[-1], last_q, threshold=0.5):
             recent.append(last_q)
         active["recent_questions"] = recent[-5:]
 
-        # Register as open pedagogical thread (or bump tries on same)
-        push_or_bump_open_thread(
-            active, last_q, activity=active.get("current_activity")
+        # Register open gap only when not advancing past a demonstrated point
+        stuck = bool(
+            active.get("stuck_signal")
+            or active.get("force_scaffold")
+            or active.get("_was_stuck_this_turn")
         )
+        if not (is_repeat and progress in ("partial_ok", "demonstrated", "closed")):
+            push_or_bump_open_thread(
+                active,
+                last_q,
+                activity=active.get("current_activity"),
+                allow_new=not stuck,
+            )
+
+    # Pinned scenario premises (free text, learner's language). Set once per open thread.
+    _prem = session_info.get("premises")
+    if isinstance(_prem, list) and _prem:
+        _ot = get_open_thread(active)
+        if _ot is not None and not _ot.get("premises"):
+            _ot["premises"] = [
+                str(x).strip()[:200] for x in _prem if str(x).strip()
+            ][:6]
 
     # LLM may signal thread closure
     closed = session_info.get("closed_thread") or session_info.get("close_thread")
@@ -2809,9 +3254,56 @@ def update_session_memory(state, session_info, response_text):
             cur["status"] = "closed"
             cur["closed_reason"] = "llm_resolved"
 
+    # Sticky stuck flag is only for this turn's open-gap lock
+    active.pop("_was_stuck_this_turn", None)
+
     thread = session_info.get("session_thread")
     if thread and str(thread).strip():
         active["session_thread"] = str(thread).strip()[:500]
+        # Book-keeping: keep short "established" bullets for continuity block
+        est = list(active.get("established_points") or [])
+        # Prefer explicit model field if present
+        for key in ("established", "established_point", "what_is_settled"):
+            val = session_info.get(key)
+            if val and str(val).strip():
+                line = str(val).strip()[:160]
+                if not is_learner_point(line):
+                    line = (TUTOR_ASSERTED + line)[:180]      # the model's own claim, not a learner demonstration
+                if line not in est:
+                    est.append(line)
+                break
+        else:
+            # Prefer explicit "Learner showed:" style; avoid stuffing tutor keys
+            first = str(thread).strip().split(".")[0].strip()
+            if first and len(first) > 24 and first.lower() not in (
+                x.lower() for x in est
+            ):
+                low = first.lower()
+                if any(
+                    w in low
+                    for w in (
+                        "learner showed",
+                        "learner:",
+                        "established:",
+                        "bewezen:",
+                        "aangetoond",
+                    )
+                ):
+                    pt = first[:160]
+                    if not is_learner_point(pt):
+                        pt = (TUTOR_ASSERTED + pt)[:180]       # "Established: ..." is the tutor's summary
+                    est.append(pt)
+        active["established_points"] = est[-8:]
+
+    # If this turn's question matches a recent one, ban fingerprint for next turns
+    if last_q:
+        recent = list(active.get("recent_questions") or [])
+        if any(questions_similar(last_q, prev, threshold=0.55) for prev in recent[:-1]):
+            banned = list(active.get("banned_questions") or [])
+            if last_q not in banned:
+                banned.append(last_q[:240])
+            active["banned_questions"] = banned[-8:]
+            active["must_advance"] = True
 
     act = active.get("current_activity")
     prev = active.get("prev_activity")
@@ -3035,11 +3527,21 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
     for t in (_ensure_open_threads(active))[-3:]:
         if t.get("status") == "closed":
             continue
-        open_list.append({
+        item = {
             "q": _clip(t.get("q"), 140),
             "status": t.get("status"),
             "tries": int(t.get("tries") or 0),
-        })
+        }
+        gc = t.get("gap_card")
+        if isinstance(gc, dict) and (gc.get("target") or gc.get("key")):
+            item["gap_card"] = {
+                "target": _clip(gc.get("target"), 120),
+                "key": _clip(gc.get("key"), 120),
+                "status": gc.get("status") or "model_only",
+                "ladder0": _clip((gc.get("scaffold_ladder") or [None])[0], 100),
+                "retracted": [_clip(x, 80) for x in (gc.get("retracted_claims") or [])[-2:]],
+            }
+        open_list.append(item)
     working = {
         "subject_id": subject_id,
         "concept_id": active.get("current_concept_id") or policy.get("concept_id"),
@@ -3052,10 +3554,30 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         "just_resumed": bool(active.get("just_resumed")),
         "pending_goal": bool(active.get("pending_goal")),
         "diagnostic_active": bool(active.get("diagnostic_active")),
-
+        "last_learner_signal": active.get("last_learner_signal"),
         "must_advance": bool(active.get("must_advance")),
         "repeat_streak": int(active.get("repeat_streak") or 0),
     }
+
+    # open_thread_q must NOT always mirror the open gap — that locked the model into
+    # re-asking the same dual-force question after the learner already answered.
+    # Only pass it when policy explicitly scaffolds that gap (stuck / missing piece).
+    _ot_progress = (ot or {}).get("progress") if ot else None
+    _probe = policy.get("probe_type") or (ot or {}).get("last_probe_type")
+    _explicit_otq = policy.get("open_thread_q")
+    if policy.get("scaffold") and _explicit_otq and _ot_progress not in (
+        "demonstrated",
+        "closed",
+    ):
+        _otq = _clip(_explicit_otq, 160)
+    elif policy.get("scaffold") and _probe in (None, "restate", "missing_piece") and _ot_progress not in (
+        "demonstrated",
+        "partial_ok",
+        "closed",
+    ):
+        _otq = _clip((ot or {}).get("q"), 160) if ot else ""
+    else:
+        _otq = ""  # advance / apply / contrast / predict → no lock on old q
 
     orchestrator = {
         "preferred_activity": policy.get("activity"),
@@ -3064,8 +3586,16 @@ def build_system_message(base_prompt, state, mode="auto", policy=None):
         "force": bool(policy.get("force")),
         "scaffold": bool(policy.get("scaffold")),
         "full_teach": bool(policy.get("full_teach")),
-        "open_thread_q": _clip(policy.get("open_thread_q") or ((ot or {}).get("q")), 160),
+        "open_thread_q": _otq or None,
+        "probe_type": _probe,
         "close_thread": bool(policy.get("close_thread")),
+        "learner_signal": policy.get("learner_signal") or active.get("last_learner_signal"),
+        "gap_progress": _ot_progress,
+        "gap_status": (
+            ((ot or {}).get("gap_card") or {}).get("status")
+            if isinstance((ot or {}).get("gap_card"), dict)
+            else None
+        ),
     }
 
     focus_cid = working.get("concept_id")
@@ -3129,15 +3659,25 @@ A deterministic policy chose the preferred next activity from learner state.
 - If orchestrator.force is true: you MUST use preferred_activity this turn.
 - If preferred_activity is set and force is false: prefer it unless the
   learner's latest message clearly requires a different move.
-- If orchestrator.full_teach is true: STOP quizzing. Write 4–8 clear sentences
-  that ANSWER the open point, preferably using the learner's own words/analogies
-  (veer, hoogteverschil, …). End with one easy yes/no or fill-in check. Set
-  session.thread_resolved=true. Do not re-ask the hard question.
-- If orchestrator.scaffold is true: first QUOTE what the learner got right,
-  then add ONE small missing piece (1–3 sentences max) — a nudge, not a lecture —
-  then ONE simpler question. Do not dump the full answer on first "geen idee".
-- If orchestrator.open_thread_q is set: stay on that point; never ignore a
-  partial answer that already points the right way.
+- If orchestrator.full_teach is true (REVEAL): give ≤3 short sentences that
+  answer the open point (use their words if possible). Then ONE question that
+  APPLIES that fact to a NEW concrete case (apply/contrast/predict).
+  FORBIDDEN: end with "explain in one sentence why [the fact you just stated]".
+  Set session.thread_resolved=true after the reveal. The check must force
+  construction, not paraphrase of your sentences.
+- If orchestrator.scaffold is true (ELICIT): start from THEIR last words.
+  Ask a hinge question that makes THEM supply the missing idea. You may add
+  at most ONE short clue that does NOT contain the answer. FORBIDDEN: lecture
+  the mechanism and then ask them to restate it. Never dump the full answer
+  on first "geen idee".
+- If orchestrator.open_thread_q is set AND preferred probe is restate/missing_piece:
+  simplify that same gap only. If open_thread_q is null/empty: do NOT recycle an
+  old gap question — advance with apply/contrast/predict on a NEW angle.
+- If orchestrator.probe_type is apply|contrast|predict: FORBIDDEN to re-ask a
+  question substantially in working_memory.recent_questions. FORBIDDEN: restate.
+- If the learner just asked their OWN insightful question ("wait, so…?", "but
+  then how…?"): RECOGNISE — answer that thread; park the previous open gap;
+  do not force the old quiz back this turn.
 - If orchestrator.close_thread is true: fully close the gap this turn.
 - When the learner asks what YOUR previous QUESTION means ("ik snap je vraag niet",
   "wat bedoel je met die vraag"): start with "Ik bedoel met die vraag: …"
@@ -3217,31 +3757,47 @@ IMMEDIATE FEEDBACK (critical):
 - Correct facts close in time to the error; then rebuild the right reasoning.
 
 WHEN THE LEARNER IS STUCK (says "geen idee", "onduidelijk", "wat bedoel je"):
-- Do NOT repeat the same abstract question or demand another analogy.
-- First give a SHORT concrete scaffold (2–4 sentences of fact), then ONE
-  simpler yes/no or fill-in question on that fact.
+- Do NOT repeat the same abstract question unchanged.
+- First stuck turn (ELICIT): L1–L2 hinge from THEIR words + ONE simpler question.
+  Do **not** hand over the full mechanism.
+- After repeated fails (or explicit "leg uit"): REVEAL ≤3 sentences of fact, then
+  ONE apply/contrast/predict on a NEW case — never "restate what I just said".
 - If they ask what you meant by a question, answer that meta-question plainly
-  in one sentence, then continue teaching — never refuse to clarify.
+  in one sentence, then continue — never refuse to clarify.
 
-BUILD ON THE LEARNER (critical — reduce frustration):
+BUILD ON THE LEARNER (critical — insight, not echo):
 - Always start from what THEY just said. Quote or paraphrase their words.
-- If they are 70% right, say what is right FIRST, then the one missing piece.
-- Do NOT ignore a good analogy (veer, hoogte, …) and later reuse it as if new.
-- Never re-ask the identical conceptual question after a partial answer; either
-  complete the answer with them or fully teach it.
+- If they are 70% right: name what is right, then a hinge that makes THEM
+  supply the missing piece — do not replace their reasoning with a lecture.
+- If THEY form an insight ("wait, so…", "aaah…"): confirm and FOLLOW that thread;
+  park the old quiz; do not shove your prior question back.
+- Never re-ask the identical conceptual question after a partial/correct answer.
 - Clarifying YOUR own question only: "Ik bedoel met die vraag: …".
   Never open a formula/symbol explanation with "Ik bedoel".
   Never "Je bedoelt:" when they are confused about what you asked.
 
+EXPLAIN-THEN-RESTATE IS FORBIDDEN:
+- Never write a fact/mechanism and end with "can you explain in one sentence why…"
+  about that same fact. That is echo, not learning.
+- After any reveal: the follow-up must force APPLY / CONTRAST / PREDICT on a case
+  the learner has not yet solved.
+- Content words of your final question must NOT mostly repeat the sentences
+  you just asserted in the same reply.
+
 OPEN THREADS:
-- Finish open points; do not loop the same quiz more than ~2 tries.
-- After repeated stuck or "leg uit": FULL answer (4–8 sentences), then easy check.
+- Finish open points; do not loop the identical quiz endlessly.
+- Escalate: elicit → richer hinge → REVEAL only after several failed tries
+  or explicit "explain fully".
+- At most ONE rephrase of the same gap question; then either reveal or advance.
+- Side questions from the learner: answer them; do not auto-return to a parked
+  quiz the same turn.
 - Set session.thread_resolved=true when the gap is closed.
 
 NEVER:
 - Keep the learner "in the dark" while fishing for a textbook phrase.
 - Repeat the same question after "geen idee" without adding substance.
 - Treat a near-correct answer as failure.
+- Quiz the learner on a paraphrase of your own last paragraph.
 
 BREADTH BEFORE DEPTH:
 - Consolidate the current concept (retrieve + explain in own words + one
@@ -3251,11 +3807,13 @@ BREADTH BEFORE DEPTH:
 
 FACTUAL ACCURACY & ANALOGIES (critical — many learners trust the tutor):
 - Prefer a short correct mechanism over a catchy analogy.
-- NEVER invent an analogy that misrepresents the physics (e.g. "heavy stone
-  waves die sooner" for pion range — that is FALSE and must not be used).
-- If you use an analogy, in the SAME turn state its limit in one clause
-  ("this only illustrates X, not Y").
-- When unsure of a detail, stay qualitative and conservative; do not bluff.
+- NEVER invent an analogy that misrepresents the mechanism.
+- If you use an analogy, in the SAME turn state its limit in one clause.
+- When unsure of a detail (masses, charges, counts, energies): stay qualitative
+  or ask — do **not** bluff a comparative fact.
+- LEARNER CORRECTION: if they say you are wrong and state a fact, check carefully.
+  If they are right, concede in the first sentence and continue from the truth.
+  Never double-down on a false claim after a correct learner correction.
 
 ONE NEW TERM PER TURN:
 - Introduce at most ONE new technical name per response (any domain: jargon,
@@ -3303,6 +3861,7 @@ Exact structure (routing FIRST):
     "concept": "concept_id or null",
     "activity": "RETRIEVAL",
     "verdict": "correct | partial | incorrect | null",
+    "learner_signal": "correct | partial | stuck | challenges_tutor | confused_by_tutor",
     "dimensions": {
       "knowledge": null,
       "retrieval": null,
@@ -3311,17 +3870,38 @@ Exact structure (routing FIRST):
       "transfer": null
     },
     "misconceptions": [],
-    "evidence": "Concrete evidence from latest learner answer."
+    "evidence": "Concrete evidence from latest learner answer.",
+    "gap_card": {
+      "target": "One-gap learning goal (short).",
+      "key": "Core insight ≤2 short sentences (proposal; status stays model_only).",
+      "expected_answer": "What a good answer expresses (short).",
+      "scaffold_ladder": ["hint step 1", "hint step 2"],
+      "status": "model_only",
+      "retracted_claims": []
+    }
   },
+
   "session": {
     "continue": true,
     "resume_instruction": "Learner-facing reconstruction question.",
     "session_thread": "Established: ... Open: ...",
     "last_question": "The exact question you just asked the learner.",
+    "premises": ["only when you pose a hypothetical: the givens of that setup, short, learner's language"],
     "thread_resolved": false,
     "closed_thread": null
   }
 }
+
+learner_signal (required when teaching): classify the *learner's last message*:
+- correct — substantially got the open point
+- partial — some right pieces, gap still open
+- stuck — cannot progress / does not know
+- challenges_tutor — disputes a tutor claim or asks if the tutor is wrong
+- confused_by_tutor — says the tutor's question/explanation is confusing
+
+gap_card: optional learning *plan* for the open gap (not a truth certificate).
+Always leave status as "model_only" unless Python/verifier changed it.
+Do not invent source URLs. On challenges_tutor, put withdrawn wrong claims in retracted_claims.
 
 routing.action: continue | switch | new_subject | list_subjects | clarify
 - switch: subject_id must be an existing id; response MUST be ""
@@ -3341,39 +3921,96 @@ One main question at a time.
 Do not mention this JSON protocol to the learner.
 """
 
-    # Concrete questions to avoid (dynamic — kept AFTER fixed prefix)
-    avoid_lines = []
-    lq = working.get("last_tutor_question")
-    if lq:
-        avoid_lines.append(f"- last: {lq}")
-    for q in (working.get("recent_questions") or [])[-3:]:
-        if q and q != lq:
-            avoid_lines.append(f"- {q}")
+    # Dynamic continuity block — positive "established" + short ban fingerprints
+    # (Claude: do NOT paste full banned questions; that made the model copy them.)
+    ot_now = get_open_thread(active)
+    ot_progress = (ot_now or {}).get("progress") if ot_now else None
+    established = [x for x in (active.get("established_points") or []) if is_learner_point(x)][-5:]
+    est_lines = [f"- {str(x)[:120]}" for x in established if x]
+    # Fingerprints only (≤12 words), not full paragraphs
+    def _fp(q):
+        words = re.findall(r"[a-z0-9à-ÿ]{3,}", str(q).lower())
+        words = [w for w in words if w not in _SIM_STOP][:10]
+        return " ".join(words) if words else ""
+
+    ban_fps = []
+    for q in (working.get("recent_questions") or [])[-4:]:
+        fp = _fp(q)
+        if fp and fp not in ban_fps:
+            ban_fps.append(fp)
     for q in (active.get("banned_questions") or [])[-6:]:
-        if q and all(q not in line for line in avoid_lines):
-            avoid_lines.append(f"- BANNED: {q}")
+        fp = _fp(q)
+        if fp and fp not in ban_fps:
+            ban_fps.append(fp)
+    # ADVANCE only when this turn actually needs a new angle — NOT merely because
+    # banned_questions is non-empty from earlier in the session (that forced
+    # permanent "move on" pressure even on genuine clarification questions).
+    force_new_angle = bool(
+        working.get("must_advance")
+        or int(active.get("repeat_streak") or 0) >= 1
+        or ot_progress in ("partial_ok", "demonstrated", "closed")
+        or int(active.get("reask_count") or 0) >= 1
+    )
+    # Stuck scaffold on a still-open gap: no "new angle" pressure
+    if (
+        ot_now
+        and policy
+        and policy.get("scaffold")
+        and ot_progress not in ("partial_ok", "demonstrated", "closed")
+        and not policy.get("full_teach")
+    ):
+        force_new_angle = False
+    # Learner asked for a definition / mechanism they never had → REVEAL, not ADVANCE
+    if policy and policy.get("full_teach") and ot_progress not in ("demonstrated", "closed"):
+        force_new_angle = False
+
     avoid_block = ""
-    if avoid_lines:
-        extra = ""
-        if (
-            working.get("must_advance")
-            or int(active.get("repeat_streak") or 0) >= 1
-            or (active.get("banned_questions") or [])
-        ):
-            extra = (
-                "CRITICAL: Learner already answered or rejected a recent question. "
-                "This turn you MUST ask a DIFFERENT question on a NEW angle "
-                "(new scenario, new concept link, or deeper mechanism). "
-                "NEVER rephrase any BANNED or recent question.\n"
+    _prem_now = (ot_now or {}).get("premises") if ot_now else None
+    if est_lines or ban_fps or force_new_angle or _prem_now:
+        parts_ab = [
+            "\n============================================================",
+            "CONTINUITY (Python — follow)",
+            "============================================================",
+        ]
+        if _prem_now:
+            parts_ab.append(
+                "PREMISES you set for the open question (stay consistent with them; "
+                "never swap them silently):"
             )
-        avoid_block = (
-            "\n============================================================\n"
-            "DO NOT RE-ASK (verbatim or paraphrase)\n"
-            "============================================================\n"
-            + extra
-            + "\n".join(avoid_lines)
-            + "\nIf the learner already answered these, ADVANCE to a new angle.\n"
-        )
+            parts_ab.extend(f"- {x}" for x in _prem_now)
+        if est_lines:
+            parts_ab.append(
+                "Already shown by the LEARNER (do not re-test the same way; "
+                "these are their demonstrated points, not your keys):"
+            )
+            parts_ab.extend(est_lines)
+        if ban_fps:
+            parts_ab.append(
+                "Do not ask a question whose content matches these fingerprints "
+                "(a paraphrase of the same check is also forbidden):"
+            )
+            for fp in ban_fps[-5:]:
+                parts_ab.append(f"- ({fp})")
+        if force_new_angle:
+            parts_ab.append(
+                "ADVANCE: next question must use apply, contrast, or predict "
+                "in a NEW situation. "
+                "FORBIDDEN: assert a fact and then ask the learner to restate it. "
+                "FORBIDDEN: any question matching the fingerprints above."
+            )
+        elif ot_now and policy and policy.get("scaffold") and policy.get("open_thread_q"):
+            parts_ab.append(
+                "ELICIT / scaffold: hinge question from what the LEARNER said. "
+                "Do NOT dump the mechanism then quiz the dump. "
+                "One clue max; the learner must still construct the insight."
+            )
+        if policy and policy.get("full_teach"):
+            parts_ab.append(
+                "REVEAL mode: ≤3 short sentences of necessary fact, then ONE apply/"
+                "contrast/predict question on a NEW concrete case — NEVER "
+                "\"in one sentence explain why [what you just said]\"."
+            )
+        avoid_block = "\n".join(parts_ab) + "\n"
 
     state_block = f"""============================================================
 CURRENT LEARNER STATE ({mode})

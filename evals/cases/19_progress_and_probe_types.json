@@ -1,0 +1,40 @@
+{
+  "id": "19_progress_and_probe_types",
+  "description": "Phase A2: partial ≠ stuck scaffold; correct advances probe type; repetition feedback forces new probe; intent phrases.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "physics_demo",
+    "subject_title": "Physics demo",
+    "goal": "understand a generic mechanism",
+    "concept_id": "energy_balance",
+    "concept_title": "Energy balance",
+    "scores": {
+      "knowledge": 0.5,
+      "retrieval": 0.4,
+      "application": 0.2,
+      "explanation": 0.45,
+      "transfer": 0.1
+    },
+    "current_activity": "EXPLANATION",
+    "prev_activity": "EXPLANATION",
+    "just_resumed": false
+  },
+  "asserts": [
+    {
+      "type": "partial_does_not_force_stuck_scaffold",
+      "value": true
+    },
+    {
+      "type": "correct_advances_probe_not_restate",
+      "value": true
+    },
+    {
+      "type": "repetition_feedback_policy",
+      "value": true
+    },
+    {
+      "type": "intent_repetition_phrases",
+      "value": true
+    }
+  ]
+}

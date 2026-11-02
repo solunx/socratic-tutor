@@ -1,0 +1,155 @@
+{
+ "version": 3,
+ "learner": {
+  "id": "vriend1",
+  "preferences": {
+   "language": "nl",
+   "tutor_style": "socratic",
+   "session_length_minutes": 30
+  }
+ },
+ "active_session": {
+  "active": false,
+  "subject_id": "kernfusie",
+  "started_at": "2026-10-17T16:38:33.524290",
+  "last_activity": "2026-10-17T17:13:27.594141",
+  "question_number": 0,
+  "hint_count": 0,
+  "current_concept_id": "kernfusie",
+  "current_activity": "MISCONCEPTION_CHECK",
+  "resume_instruction": "Wat betekent die sterker wordende afstoting dan voor de energie die nodig is om de kernen dicht genoeg bij elkaar te krijgen?",
+  "pending_goal": false,
+  "just_resumed": false,
+  "session_thread": "Learner incorrectly suggested larger nuclei fuse more easily. Tutor corrected this by emphasizing the stronger Coulomb repulsion due to higher charge. Open: Learner needs to connect increased proton count to higher energy requirements for fusion.",
+  "last_tutor_question": "Wat betekent die sterker wordende afstoting dan voor de energie die nodig is om die afstoting te overwinnen?",
+  "recent_questions": [
+   "Kleine hint: een zwaardere kern is meestal groter. Als de kernen groter zijn, hoe ver van elkaar moeten ze dan nog zijn voordat hun oppervlakken elkaar raken, en wat betekent dat voor de afstand waar de afstoting het sterkst is?",
+   "Wat betekent die grotere lading dan voor de energie die nodig is om die afstoting te overwinnen?"
+  ],
+  "open_threads": [],
+  "diagnostic_active": false,
+  "stuck_signal": false,
+  "learner_correction": false,
+  "force_scaffold": false,
+  "last_learner_signal": "partial",
+  "must_advance": false,
+  "confused_by_tutor": false,
+  "partial_missing": true,
+  "repeat_streak": 0,
+  "reask_count": 1,
+  "established_points": [
+   "Learner showed: Learner correctly identified the neutron as the particle that enters the nucleus more easily when both have the same energy.",
+   "Learner showed: Learner correctly explained that the neutron has no charge and is not repelled, while the proton is repelled.",
+   "Learner showed: Learner correctly identified the neutron as the particle that enters the nucleus more easily and explained why based on char",
+   "Learner showed: Learner correctly predicted that a charged neutron would have a harder time entering the nucleus due to repulsion.",
+   "Learner showed: Learner correctly explained that the electron is negatively charged and is attracted to the positive nucleus, making it easi"
+  ],
+  "same_activity_streak": 1,
+  "prev_activity": "MISCONCEPTION_CHECK",
+  "last_verdict": "incorrect",
+  "pending_verdict_feedback": true,
+  "soft_incorrect": false,
+  "banned_questions": [
+   "Wat zou er gebeuren als het neutron wel positief geladen zou zijn, zoals een proton?",
+   "Stel dat je een neutron en een elektron hebt die beide dezelfde energie hebben. Welk deeltje komt makkelijker de kern binnen, en waarom?",
+   "Een neutron en een elektron hebben beide dezelfde energie. Welk deeltje komt makkelijker de kern binnen, en waarom?",
+   "Welk deeltje komt dan makkelijker de kern binnen, en waarom?"
+  ],
+  "repetition_feedback": false,
+  "echo_teach_flag": true,
+  "prefer_probe_type": "apply",
+  "force_full_teach": false
+ },
+ "subjects": {
+  "kernfusie": {
+   "title": "kernfusie",
+   "goal": null,
+   "created_at": "2026-10-15T08:49:22.429069",
+   "updated_at": "2026-10-15T08:49:22.429072",
+   "parent_id": null,
+   "related": [],
+   "aliases": [],
+   "concepts": {
+    "kernfusie": {
+     "title": "Kernfusie",
+     "knowledge": 0.6,
+     "retrieval": 0.5,
+     "application": 0.3,
+     "explanation": 0.6,
+     "transfer": 0.2,
+     "misconceptions": [
+      {
+       "id": null,
+       "description": "Learner incorrectly assumes larger nuclei fuse more easily due to closer surface contact, overlooking the stronger Coulomb repulsion from higher charge.",
+       "severity": "high",
+       "status": "open",
+       "evidence": "",
+       "remediation_hint": null,
+       "created_at": "2026-10-17T17:10:27.836813"
+      }
+     ],
+     "evidence": [
+      {
+       "date": "2026-10-17T17:02:44.848091",
+       "evidence": "Learner correctly identified that positive charges repel and that extra energy is needed to overcome this repulsion."
+      },
+      {
+       "date": "2026-10-17T17:03:51.552198",
+       "evidence": "Learner correctly identified that the nucleus with 92 protons requires more energy due to stronger repulsion."
+      },
+      {
+       "date": "2026-10-17T17:04:25.155964",
+       "evidence": "Learner correctly identified that the nucleus with 92 protons requires more energy, showing understanding of the Coulomb barrier's dependence on charge. They then noted the next question was too easy, indicating readiness for a more complex application."
+      },
+      {
+       "date": "2026-10-17T17:05:16.310510",
+       "evidence": "Learner asked for a hint after stating the previous question was too easy, indicating readiness for a more complex application involving mass."
+      },
+      {
+       "date": "2026-10-17T17:06:02.023571",
+       "evidence": "Learner asked 'Wat is coulomb kracht' after being given a hint about Coulomb force and distance, indicating a knowledge gap on the basic definition."
+      },
+      {
+       "date": "2026-10-17T17:06:52.255708",
+       "evidence": "Learner asked for a second hint on the relationship between nuclear mass/size and the distance required for fusion."
+      },
+      {
+       "date": "2026-10-17T17:10:27.836818",
+       "evidence": "Learner stated 'Grotere kernen kunnen gemakkelijker fuseren omdat de rand dichter komt', which contradicts the fundamental principle that higher charge increases Coulomb barrier energy."
+      },
+      {
+       "date": "2026-10-17T17:12:18.747672",
+       "evidence": "Learner stated 'Grotere kernen kunnen gemakkelijker fuseren omdat de rand dichter komt' and 'Hoe groter, hoe gemakkelijker ze elkaar raken toch en de coulomb kracht hetzelfde was bij beide kernen', showing a persistent misconception about the relationship between nucleus size, charge, and fusion difficulty."
+      }
+     ],
+     "last_practiced": "2026-10-17T17:12:18.747675",
+     "next_review": "2026-10-18T17:12:18.747699",
+     "review_count": 32,
+     "stability": 84.394,
+     "difficulty": 10.0,
+     "reps": 0,
+     "lapses": 10,
+     "fsrs_state": "relearning",
+     "last_review": "2026-10-17T17:12:18.747698",
+     "last_grade": 1,
+     "parent_concept_id": null,
+     "aliases": [],
+     "prerequisites": []
+    }
+   },
+   "diagnostic": {
+    "status": "done",
+    "turns": 1,
+    "max_turns": 3,
+    "level_estimate": "novice",
+    "notes": "Learner identified fusion as the harder concept to remember, indicating a specific area of difficulty."
+   }
+  }
+ },
+ "meta": {
+  "pending_catalog": [],
+  "taxonomy_events": []
+ },
+ "review_queue": [],
+ "history": []
+}

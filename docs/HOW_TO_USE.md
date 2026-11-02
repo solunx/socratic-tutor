@@ -24,7 +24,7 @@ Jouw voortgang is **persoonlijk** en gescheiden van andere gebruikers.
 De tutor is **geen Google**. Het doel is dat **jij** beter leert redeneren.
 
 - Antwoord in je **eigen woorden**.
-- “Geen idee” mag — de tutor helpt dan met een kleinere stap.
+- “Geen idee” mag — de tutor geeft dan een **kleine duw**, niet meteen het hele antwoord (zo leer je dieper).
 - Bij een fout krijg je zo snel mogelijk duidelijkheid; daarna weer een vraag, geen heel handboek.
 
 ### Starten of verdergaan

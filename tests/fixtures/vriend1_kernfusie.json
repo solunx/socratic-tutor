@@ -1,0 +1,345 @@
+{
+ "_about": "Real session: vriend1 / kernfusie / 2026-10-17 (message indices are those of web_conversation.json thread 'kernfusie'). Tests assert on MECHANISMS, never on physics truth.",
+ "turns": [
+  {
+   "idx": 21,
+   "role": "assistant",
+   "text": "Kun je uitleggen waarom er een neutron bij moet komen in dat eerste stapje?"
+  },
+  {
+   "idx": 23,
+   "role": "user",
+   "text": "Vertel mij"
+  },
+  {
+   "idx": 24,
+   "role": "assistant",
+   "text": "Ik wil niet alles in één keer uitleggen — dat werkt beter als je me meedenkt. Je vroeg net waarom er een neutron bij moet in dat eerste stapje. Kun je in je eigen woorden zeggen wat je daar al over weet of vermoedt?"
+  },
+  {
+   "idx": 25,
+   "role": "user",
+   "text": "Ik kan de vorige stap niet meer zien, kan je nog eens uitleggen"
+  },
+  {
+   "idx": 26,
+   "role": "assistant",
+   "text": "Geen probleem, ik herhaal het kort. We kijken naar de eerste stap van de D-T-fusie: een deuteriumkern (1 proton, 1 neutron) en een tritiumkern (1 proton, 2 neutronen) komen samen. De vraag was: waarom is het belangrijk dat er een neutron bij komt in dat proces? Wat denk je dat een neutron anders doet dan een proton, dat het handig maakt voor deze stap?"
+  },
+  {
+   "idx": 27,
+   "role": "user",
+   "text": "Je gaat mij toch een hint moeten geven"
+  },
+  {
+   "idx": 28,
+   "role": "assistant",
+   "text": "Klopt, hier is de kern: een neutron heeft geen lading, dus het wordt niet afgestoten door de positieve kern. Een proton wél. In de eerste stap van D-T-fusie wordt een neutron vrijgemaakt omdat het de energie kan meenemen zonder dat het door de lading wordt tegengehouden. Nu de toepassing: als dat neutron een positief geladen deeltje zou zijn, wat zou er dan gebeuren als het dicht bij een andere kern komt?"
+  },
+  {
+   "idx": 29,
+   "role": "user",
+   "text": "Er komt energie vrij"
+  },
+  {
+   "idx": 30,
+   "role": "assistant",
+   "text": "Je zegt dat er energie vrijkomt. Dat klopt inderdaad: bij kernfusie komt energie vrij omdat de eindkernen samen iets lichter zijn dan de beginkernen, en dat massa-verschil wordt energie. Maar de vraag was iets specifieker: wat is er anders aan een neutron vergeleken met een proton, dat het handig maakt om energie mee te nemen uit de kern? Kun je die eigenschap noemen?"
+  },
+  {
+   "idx": 31,
+   "role": "user",
+   "text": "De lading"
+  },
+  {
+   "idx": 32,
+   "role": "assistant",
+   "text": "Ja, de lading is het sleutelwoord. Een neutron heeft geen lading, dus het wordt niet afgestoten door de positieve kern. Nu een nieuwe situatie: stel dat je een neutron en een proton hebt die beide dezelfde energie hebben. Welk deeltje komt makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 33,
+   "role": "user",
+   "text": "Neutron"
+  },
+  {
+   "idx": 34,
+   "role": "assistant",
+   "text": "Klopt, het neutron. Maar waarom komt het makkelijker binnen dan het proton?"
+  },
+  {
+   "idx": 35,
+   "role": "user",
+   "text": "Heeft te maken met de afstoting, proton stoot af, neutron niet"
+  },
+  {
+   "idx": 36,
+   "role": "assistant",
+   "text": "Precies, het neutron heeft geen lading en wordt dus niet afgestoten. Nu een nieuwe situatie: stel dat je een proton en een neutron hebt die beide dezelfde energie hebben. Welk deeltje komt makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 37,
+   "role": "user",
+   "text": "Dit is toch dezelfde vraag?"
+  },
+  {
+   "idx": 38,
+   "role": "assistant",
+   "text": "Je hebt gelijk, dat was een herhaling. Laten we een nieuwe situatie nemen: een neutron en een elektron hebben beide dezelfde energie. Welk deeltje komt makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 39,
+   "role": "user",
+   "text": "Dit slaat nergens op"
+  },
+  {
+   "idx": 40,
+   "role": "assistant",
+   "text": "Je hebt gelijk, dat was onduidelijk. Laten we het anders aanpakken. Je weet dat het neutron makkelijker binnenkomt omdat het geen lading heeft. Wat zou er gebeuren als het neutron wel positief geladen zou zijn, zoals een proton?"
+  },
+  {
+   "idx": 41,
+   "role": "user",
+   "text": "Moeilijker in de kern geraken"
+  },
+  {
+   "idx": 42,
+   "role": "assistant",
+   "text": "Klopt, dan zou het worden afgestoten door de positieve kern. Nu een nieuwe situatie: een neutron en een elektron hebben beide dezelfde energie. Welk deeltje komt makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 43,
+   "role": "user",
+   "text": "Je hebt dit al gevraagd, de elektronische gt gemakkelijker in de kern dringen"
+  },
+  {
+   "idx": 44,
+   "role": "assistant",
+   "text": "Sorry voor de herhaling. Je zegt dat het elektron gemakkelijker de kern binnendringt. Wat is de reden voor jouw keuze?"
+  },
+  {
+   "idx": 45,
+   "role": "user",
+   "text": "Elktron is negatief en kan gemakkelijker aangetrokken wrd dr de kern"
+  },
+  {
+   "idx": 46,
+   "role": "assistant",
+   "text": "Precies, de aantrekking door de lading maakt het verschil. Laten we dat toepassen: stel je hebt een neutron en een positron (een positief geladen elektron) met dezelfde energie. Welk deeltje komt dan makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 47,
+   "role": "user",
+   "text": "Neutron wordt niet afgestoten dr negatieve lading"
+  },
+  {
+   "idx": 48,
+   "role": "assistant",
+   "text": "Dat klopt: het neutron heeft geen lading en wordt dus niet afgestoten. Maar je noemde ook een positron. Wat gebeurt er met die positieve lading als hij dicht bij de positieve kern komt?"
+  },
+  {
+   "idx": 49,
+   "role": "user",
+   "text": "Ik heb niet gesproken over een positron en een neutron heeft geen lading, ik had gezegd dat het een negatieve lading had"
+  },
+  {
+   "idx": 50,
+   "role": "assistant",
+   "text": "Je hebt gelijk, ik had het elektron in plaats van het positron bedoeld. Laten we het opnieuw proberen: stel je hebt een neutron en een elektron met dezelfde energie. Welk deeltje komt dan makkelijker de kern binnen, en waarom?"
+  },
+  {
+   "idx": 51,
+   "role": "user",
+   "text": "We hbb die vraag reeds gehad, ga verder met de verdieping"
+  },
+  {
+   "idx": 52,
+   "role": "assistant",
+   "text": "Goed, we gaan verder. In kernfusie botsen twee lichte kernen op elkaar, zoals deuterium en tritium. Beide kernen zijn positief geladen. Welk probleem veroorzaakt die lading voor de fusie, en wat moet er gebeuren om dat probleem te overwinnen?"
+  },
+  {
+   "idx": 53,
+   "role": "user",
+   "text": "Ze stoten elkaar af, er moet extra energie toegevoegd wrd"
+  },
+  {
+   "idx": 54,
+   "role": "assistant",
+   "text": "Precies, de afstoting is het probleem en extra energie is de oplossing. Maar die 'extra energie' is geen willekeurig getal: het hangt af van hoe dicht de kernen bij elkaar komen en hoe sterk de afstoting is. Stel je twee kernen met dezelfde lading, maar de ene is zwaarder (grote kern) en de andere lichter (kleine kern). Welke combinatie vereist dan meer energie om te fuseren, en waarom?"
+  },
+  {
+   "idx": 55,
+   "role": "user",
+   "text": "Please tell me"
+  },
+  {
+   "idx": 56,
+   "role": "assistant",
+   "text": "De zwaardere kern vereist meer energie. Stel je hebt twee kernen: de een met 2 protonen en de ander met 92 protonen. Welke kern vereist meer energie om te fuseren met een andere lichte kern, en waarom?"
+  },
+  {
+   "idx": 57,
+   "role": "user",
+   "text": "Dit is een dwaze vraag, mr het is 92 protonen"
+  },
+  {
+   "idx": 58,
+   "role": "assistant",
+   "text": "Duidelijk, de kern met 92 protonen vereist meer energie. Stel je hebt nu twee kernen: de een met 1 proton en de ander met 2 protonen. Welke van die twee vereist meer energie om te fuseren met een derde kern met 1 proton, en waarom?"
+  },
+  {
+   "idx": 59,
+   "role": "user",
+   "text": "T was te gemakkelijk,niet onduidelijk"
+  },
+  {
+   "idx": 60,
+   "role": "assistant",
+   "text": "Goed, dan gaan we een stap dieper. Je hebt al gezien dat de lading (aantal protonen) de benodigde energie bepaalt. Maar er is nog een factor: de massa van de kernen. Stel je hebt twee kernen met dezelfde lading (bijv. beide 2 protonen), maar de ene is veel zwaarder (bijv. een zware isotoop) en de andere lichter. Welke vereist dan meer energie om te fuseren, en waarom?"
+  },
+  {
+   "idx": 61,
+   "role": "user",
+   "text": "Hint please"
+  },
+  {
+   "idx": 62,
+   "role": "assistant",
+   "text": "Denk aan de Coulomb-kracht: die hangt af van de ladingen en de afstand. Als de ladingen gelijk zijn, wat verandert er dan als de kern zwaarder is, en hoe beïnvloedt dat de afstand waar de krachten elkaar moeten overwinnen?"
+  },
+  {
+   "idx": 63,
+   "role": "user",
+   "text": "Wat is coulomb kracht"
+  },
+  {
+   "idx": 64,
+   "role": "assistant",
+   "text": "De Coulomb-kracht is de elektrische kracht tussen geladen deeltjes: gelijke ladingen stoten elkaar af, tegengestelde ladingen trekken elkaar aan. Hoe groter de ladingen en hoe kleiner de afstand, hoe sterker die kracht. Nu terug naar de vraag: als twee kernen dezelfde lading hebben, maar de ene veel zwaarder is, wat verandert er dan aan de afstand die ze moeten overbruggen om te fuseren?"
+  },
+  {
+   "idx": 65,
+   "role": "user",
+   "text": "Hint 2"
+  },
+  {
+   "idx": 66,
+   "role": "assistant",
+   "text": "Kleine hint: een zwaardere kern is meestal groter. Als de kernen groter zijn, hoe ver van elkaar moeten ze dan nog zijn voordat hun oppervlakken elkaar raken, en wat betekent dat voor de afstand waar de afstoting het sterkst is?"
+  },
+  {
+   "idx": 67,
+   "role": "user",
+   "text": "Grotere kernen kunnen gemakkelijker fuseren omdat de rand dichter komt"
+  },
+  {
+   "idx": 68,
+   "role": "assistant",
+   "text": "Dat klopt niet helemaal: grotere kernen fuseren juist moeilijker, omdat de Coulomb-afstoting sterker is. Als twee kernen groter zijn, moeten ze dichter op elkaar komen voordat hun oppervlakken raken. Wat betekent die grotere lading dan voor de energie die nodig is om die afstoting te overwinnen?"
+  },
+  {
+   "idx": 69,
+   "role": "user",
+   "text": "Hoe groter, hoe gemakkelijker ze elkaar raken toch en de coulomb kracht hetzelfde was bij beide kernen"
+  },
+  {
+   "idx": 70,
+   "role": "assistant",
+   "text": "Je hebt gelijk dat de Coulomb-kracht bij dezelfde ladingen hetzelfde is, maar je vergeten: grotere kernen hebben meestal meer protonen, dus een hogere lading. Die hogere lading maakt de afstoting sterker. Wat betekent die sterker wordende afstoting dan voor de energie die nodig is om de kernen dicht genoeg bij elkaar te krijgen?"
+  },
+  {
+   "idx": 71,
+   "role": "user",
+   "text": "/quit"
+  },
+  {
+   "idx": 72,
+   "role": "assistant",
+   "text": "Sessie opgeslagen. Je kunt later verder met “ik wil verder met …” of via ☰."
+  }
+ ],
+ "must_block": [
+  36,
+  38,
+  42,
+  46,
+  50
+ ],
+ "must_allow": [
+  34,
+  40,
+  44,
+  48,
+  52,
+  54,
+  56,
+  58,
+  60,
+  62,
+  64,
+  66,
+  68,
+  70
+ ],
+ "expected_answers": {
+  "32": "neutron, omdat het geen lading heeft en niet wordt afgestoten door de positieve kern",
+  "34": "omdat het neutron geen lading heeft en dus niet wordt afgestoten door de positieve kern",
+  "54": "bij gelijke lading is de afstoting vrijwel gelijk; verschil via grootte is klein",
+  "60": "bij gelijke lading is de afstoting vrijwel gelijk; verschil via grootte is klein",
+  "62": "de afstand tussen de kernen bij contact is groter",
+  "66": "de afstand tussen de kernen bij contact is groter"
+ },
+ "leak_positive": [
+  32,
+  34
+ ],
+ "leak_negative": [
+  54,
+  60,
+  62
+ ],
+ "leak_known_miss": [
+  70
+ ],
+ "premises_at_60": [
+  "twee kernen met dezelfde lading",
+  "de ene kern is zwaarder (grotere massa/straal)",
+  "vergelijk welke meer energie nodig heeft om te fuseren"
+ ],
+ "isotope_turns": {
+  "hint_that_led_learner": 66,
+  "learner_insight": 67,
+  "tutor_hard_reject": 68,
+  "learner_objection": 69,
+  "tutor_premise_swap": 70
+ },
+ "policy_lag_events": [
+  {
+   "ts": "16:52:36",
+   "learner": "Moeilijker in de kern geraken",
+   "observed": "confused_by_tutor (from the previous message)",
+   "expected": "normal answer handling"
+  },
+  {
+   "ts": "16:58:55",
+   "learner": "Ik heb niet gesproken over een positron en een neutron heeft geen lading",
+   "observed": "must advance",
+   "expected": "learner-correction path (tutor misattributed)"
+  },
+  {
+   "ts": "17:05:16",
+   "learner": "Hint please",
+   "observed": "must advance (repeat_streak=3)",
+   "expected": "scaffold / ELICIT"
+  },
+  {
+   "ts": "17:10:27",
+   "learner": "Grotere kernen kunnen gemakkelijker fuseren omdat de rand dichter komt",
+   "observed": "must advance (broke loop from EXPLANATION)",
+   "expected": "evaluate the answer; no loop-break"
+  }
+ ],
+ "leak_borderline": {
+  "idx": 66,
+  "note": "hint that states half of the answer; lexical coverage ~0.67 -> allowed at threshold 0.75; acceptable as a hint"
+ }
+}

@@ -117,7 +117,7 @@ def _last_unanswered_tutor_q(conv: list) -> str | None:
 
 app = FastAPI(
     title="Local Agent Gateway",
-    version="0.5.0",
+    version="0.5.7",
     description="Multi-user tutor gateway (private network or TLS public)",
 )
 
@@ -223,8 +223,14 @@ def auth_login(body: LoginBody, request: Request, response: Response):
 
 
 @app.post("/api/auth/logout")
-def auth_logout(response: Response):
+def auth_logout(request: Request, response: Response):
+    uid = _current_user(request)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
+    try:
+        if debug_events is not None and uid:
+            debug_events.log_event(uid, "logout", ip=_client_ip(request))
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -389,14 +395,16 @@ def _save_store(session_id: str, store: dict) -> None:
             path = CONV_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
         T.atomic_save_json(path, payload)
-    except Exception:
+    except Exception as e:
+        logger = __import__("logging").getLogger("gateway")
+        logger.exception("atomic_save_json failed for conv %s: %s", session_id, e)
         try:
             path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.exception("fallback conv write failed for %s: %s", session_id, e2)
 
 
 
@@ -658,6 +666,7 @@ def _result_dict(result: dict, user_id: str | None = None) -> dict:
         "raw_preview",
         "resume_reused",
         "switched_from_thread",
+        "sources",
     ):
         if key in result and result[key] is not None:
             out[key] = result[key]
@@ -691,6 +700,27 @@ class TurnResponse(BaseModel):
     raw_preview: Optional[str] = None
     thread_id: Optional[str] = None
     history: Optional[list[Any]] = None
+
+
+@app.get("/api/v1/knowledge-doc")
+def knowledge_doc(request: Request, path: str = ""):
+    """Serve a file from knowledge/docs/ (authenticated). Path is relative, no .."""
+    uid = _current_user(request)
+    if not uid:
+        raise HTTPException(401, "login required")
+    rel = (path or "").replace("\\", "/").lstrip("/")
+    if not rel or ".." in rel.split("/") or rel.startswith("/"):
+        raise HTTPException(400, "invalid path")
+    base = (ROOT / "knowledge" / "docs").resolve()
+    target = (base / rel).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "invalid path")
+    if not target.is_file():
+        raise HTTPException(404, "not found")
+    media = "text/markdown; charset=utf-8" if target.suffix.lower() == ".md" else "text/plain; charset=utf-8"
+    return FileResponse(target, media_type=media, filename=target.name)
 
 
 @app.get("/api/health")
@@ -888,19 +918,18 @@ def turn_stream(request: Request, req: TurnRequest):
         raise HTTPException(400, "Empty message")
 
     def event_stream() -> Generator[str, None, None]:
-        # Hold per-user lock for whole stream (load → LLM → save)
-        lock = T.acquire_user_lock(sid)
-        with lock:
-            try:
-                yield from _event_stream_inner()
-            except Exception as e:
-                yield _sse({
-                    "type": "done",
-                    "ok": False,
-                    "kind": "error",
-                    "response": f"Server error: {type(e).__name__}: {e}",
-                    "agent": "tutor",
-                })
+        # Do NOT hold RLock across generator yield (Starlette may resume on another
+        # thread → RuntimeError / stuck lock). Lock is acquired inside the worker.
+        try:
+            yield from _event_stream_inner()
+        except Exception as e:
+            yield _sse({
+                "type": "done",
+                "ok": False,
+                "kind": "error",
+                "response": f"Server error: {type(e).__name__}: {e}",
+                "agent": "tutor",
+            })
 
     def _event_stream_inner() -> Generator[str, None, None]:
         import queue
@@ -915,23 +944,26 @@ def turn_stream(request: Request, req: TurnRequest):
         store["active_thread"] = tid
         conv = _get_thread(store, tid)
 
-        # Commands: instant done, no tokens
-        cmd = core._handle_command(state, conv, message, user_id=sid)
-        if cmd is not None:
-            T.save_state(state, user_id=sid)
-            # Persist command output on this thread (lobby or subject)
-            if message.strip().startswith("/"):
-                conv.append({"role": "user", "content": message.strip()})
-            resp = (cmd.get("response") or "").strip()
-            if resp:
-                conv.append({"role": "assistant", "content": resp})
-            store["active_thread"] = tid
-            _save_store(sid, store)
-            _log_turn(sid, message, tid_from, tid, cmd)
-            payload = _result_dict(cmd, sid)
-            payload["type"] = "done"
-            payload["thread_id"] = tid
-            payload["history"] = _history_for_ui(conv)
+        # Commands: instant done, no tokens (lock in this thread only)
+        with T.acquire_user_lock(sid):
+            cmd = core._handle_command(state, conv, message, user_id=sid)
+            if cmd is not None:
+                T.save_state(state, user_id=sid)
+                if message.strip().startswith("/"):
+                    conv.append({"role": "user", "content": message.strip()})
+                resp = (cmd.get("response") or "").strip()
+                if resp:
+                    conv.append({"role": "assistant", "content": resp})
+                store["active_thread"] = tid
+                _save_store(sid, store)
+                _log_turn(sid, message, tid_from, tid, cmd)
+                payload = _result_dict(cmd, sid)
+                payload["type"] = "done"
+                payload["thread_id"] = tid
+                payload["history"] = _history_for_ui(conv)
+            else:
+                payload = None
+        if payload is not None:
             yield _sse({"type": "start", "thread_id": tid})
             yield _sse(payload)
             return
@@ -944,21 +976,32 @@ def turn_stream(request: Request, req: TurnRequest):
             q.put(("token", delta))
 
         def worker():
-            try:
-                result_box["result"] = core.handle_turn(
-                    message,
-                    state=state,
-                    conversation=conv,
-                    agent="tutor",
-                    save=True,
-                    stream=True,
-                    on_response_delta=_on_delta,
-                    user_id=sid,
-                )
-            except Exception as e:
-                result_box["error"] = str(e)
-            finally:
-                q.put(("end", None))
+            # Lock + handle_turn + persist conversation in THIS thread so a client
+            # disconnect cannot skip _save_store (that was wiping chat on reload).
+            lock = T.acquire_user_lock(sid)
+            with lock:
+                try:
+                    result_box["result"] = core.handle_turn(
+                        message,
+                        state=state,
+                        conversation=conv,
+                        agent="tutor",
+                        save=True,
+                        stream=True,
+                        on_response_delta=_on_delta,
+                        user_id=sid,
+                    )
+                    # Early persist: messages already on `conv` via handle_turn
+                    store["active_thread"] = tid
+                    _save_store(sid, store)
+                    result_box["early_saved"] = True
+                except Exception as e:
+                    __import__("logging").getLogger("gateway").exception(
+                        "stream turn failed user=%s", sid
+                    )
+                    result_box["error"] = f"{type(e).__name__}: {e}"
+                finally:
+                    q.put(("end", None))
 
         yield _sse({"type": "start", "thread_id": tid})
         threading.Thread(target=worker, daemon=True).start()
@@ -986,6 +1029,42 @@ def turn_stream(request: Request, req: TurnRequest):
             "response": "No result",
             "agent": "tutor",
         }
+        # handle_turn mutates `conv` in place (user+assistant). Re-get in case of switch later.
+        # Defensive: if assistant reply missing on this thread, append it so refresh keeps history.
+        resp_txt = (result.get("response") or "").strip()
+        if resp_txt and result.get("kind") in ("message", "resume", None, ""):
+            last = conv[-1] if conv else None
+            last_c = str((last or {}).get("content") or "").strip() if isinstance(last, dict) else ""
+            if last_c != resp_txt:
+                # User line
+                ut = message.strip()
+                if not (
+                    conv
+                    and isinstance(conv[-1], dict)
+                    and conv[-1].get("role") == "user"
+                    and str(conv[-1].get("content") or "").strip() == ut
+                ):
+                    # may already have user from handle_turn
+                    has_user = (
+                        len(conv) >= 1
+                        and isinstance(conv[-1], dict)
+                        and conv[-1].get("role") == "user"
+                        and str(conv[-1].get("content") or "").strip() == ut
+                    ) or (
+                        len(conv) >= 2
+                        and isinstance(conv[-2], dict)
+                        and conv[-2].get("role") == "user"
+                        and str(conv[-2].get("content") or "").strip() == ut
+                    )
+                    if not has_user:
+                        conv.append({"role": "user", "content": ut})
+                if not (
+                    conv
+                    and isinstance(conv[-1], dict)
+                    and conv[-1].get("role") == "assistant"
+                    and str(conv[-1].get("content") or "").strip() == resp_txt
+                ):
+                    conv.append({"role": "assistant", "content": resp_txt})
         state2 = T.load_state(user_id=sid)
         if result.get("kind") == "lobby":
             tid = LOBBY
@@ -1034,15 +1113,15 @@ def turn_stream(request: Request, req: TurnRequest):
                     active["resume_instruction"] = q
                     active["just_resumed"] = True
                     T.save_state(state2, user_id=sid)
-        store["active_thread"] = tid
-        _save_store(sid, store)
-        _log_turn(sid, message, tid_from, tid, result)
-        out = _result_dict(result, sid)
-        out["type"] = "done"
-        out["thread_id"] = tid
-        out["history"] = _history_for_ui(_get_thread(store, tid))
-        # Avoid duplicating full response if tokens already streamed
-        out["streamed"] = True
+        with T.acquire_user_lock(sid):
+            store["active_thread"] = tid
+            _save_store(sid, store)
+            _log_turn(sid, message, tid_from, tid, result)
+            out = _result_dict(result, sid)
+            out["type"] = "done"
+            out["thread_id"] = tid
+            out["history"] = _history_for_ui(_get_thread(store, tid))
+            out["streamed"] = True
         yield _sse(out)
 
     return StreamingResponse(

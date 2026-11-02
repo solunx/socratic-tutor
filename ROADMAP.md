@@ -286,6 +286,10 @@ Thinking control: field is **`think`** (not `thinking`) on native `/api/chat`. T
 | 2026-10 | Observability: metrics_lib + per-component token breakdown; measure before optimising |
 | 2026-10 | Multi-user auth + per-user `data/users/<id>/` |
 | 2026-10-15 | **Isolation bug fixed:** `start_session`/`close_session` called `save_state(state)` without `user_id` → wrote into `DEFAULT_USER_ID`. Fix: `_resolve_uid` from `learner.id`, `STRICT_USERS` in gateway, pass `user_id` on session paths; regression `tools/test_isolation_save.py` |
+| 2026-10-16 | **Productive struggle:** raise full-teach threshold (tries≥5); first stuck = L1–L2 nudge only; prompt/static rules bias under-help |
+| 2026-10-16 | **Thread continuity:** same open gap; explicit bridge on angle change; never abandon unanswered Q |
+| 2026-10-16 | **Factual integrity:** learner-correction path; no bluff on comparative facts; prompt integrity block |
+| 2026-10-16 | **Event log:** richer turn fields (policy reason, verdict, response_chars); tail_events --verbose/--switches/--list |
 
 ---
 

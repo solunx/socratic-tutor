@@ -409,6 +409,213 @@ def run_assert(assertion: dict, result: dict | None, raw: str, policy: dict | No
         ok = needle in topic.lower() if needle else bool(topic)
         return ok, f"topic={topic!r}"
 
+    # Phase A — learner_signal + gap_card (pure Python, domain-agnostic)
+    # Use tutor_mod.* to avoid shadowing module-level imports inside run_assert.
+    if t == "learner_signal_stuck_policy":
+        st = default_state()
+        ensure_subject(st, "physics_demo", title="Physics demo")
+        ensure_concept(st, "physics_demo", "energy_balance")
+        st["active_session"].update({
+            "active": True,
+            "subject_id": "physics_demo",
+            "current_concept_id": "energy_balance",
+            "current_activity": "EXPLANATION",
+            "pending_goal": False,
+        })
+        st["subjects"]["physics_demo"]["diagnostic"] = {
+            "status": "done", "turns": 3, "max_turns": 3
+        }
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"],
+            "Why does this process need energy input?",
+            activity="EXPLANATION",
+        )
+        tutor_mod.apply_learner_signal(st, {"learner_signal": "stuck"})
+        pol = suggest_next_activity(st)
+        ok = bool(pol.get("scaffold") or pol.get("force")) and (
+            "stuck" in str(pol.get("reason") or "").lower()
+            or "don't know" in str(pol.get("reason") or "").lower()
+            or "gap" in str(pol.get("reason") or "").lower()
+        )
+        return ok, f"policy={pol.get('activity')} force={pol.get('force')} reason={str(pol.get('reason'))[:120]}"
+
+    if t == "learner_signal_challenge_policy":
+        st = default_state()
+        ensure_subject(st, "physics_demo", title="Physics demo")
+        ensure_concept(st, "physics_demo", "energy_balance")
+        st["active_session"].update({
+            "active": True,
+            "subject_id": "physics_demo",
+            "current_concept_id": "energy_balance",
+            "current_activity": "EXPLANATION",
+            "pending_goal": False,
+        })
+        st["subjects"]["physics_demo"]["diagnostic"] = {
+            "status": "done", "turns": 3, "max_turns": 3
+        }
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"],
+            "What balances the charges in this step?",
+            activity="EXPLANATION",
+        )
+        tutor_mod.apply_learner_signal(st, {"learner_signal": "challenges_tutor"})
+        pol = suggest_next_activity(st)
+        ok = bool(pol.get("learner_correction") or "correction" in str(pol.get("reason") or "").lower()
+                  or "challenge" in str(pol.get("reason") or "").lower())
+        return ok, f"reason={str(pol.get('reason'))[:140]}"
+
+    if t == "gap_card_model_only_default":
+        st = default_state()
+        st["active_session"]["active"] = True
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"], "Open gap question?", activity="EXPLANATION"
+        )
+        tutor_mod.merge_gap_card_from_assessment(st, {
+            "gap_card": {
+                "target": "Understand energy balance",
+                "key": "Net energy depends on masses and binding",
+                "expected_answer": "Learner explains net energy origin",
+                "scaffold_ladder": ["What is compared?", "Where does the difference go?"],
+                "status": "model_only",
+            }
+        })
+        ot = tutor_mod.get_open_thread(st["active_session"])
+        gc = (ot or {}).get("gap_card") or {}
+        ok = gc.get("status") == "model_only" and bool(gc.get("target")) and len(gc.get("scaffold_ladder") or []) >= 1
+        return ok, f"status={gc.get('status')} target={gc.get('target')!r}"
+
+    if t == "gap_card_no_self_verify":
+        st = default_state()
+        st["active_session"]["active"] = True
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"], "Open gap?", activity="EXPLANATION"
+        )
+        tutor_mod.merge_gap_card_from_assessment(st, {
+            "gap_card": {
+                "target": "X",
+                "key": "Y",
+                "status": "source_backed",
+            }
+        })
+        ot = tutor_mod.get_open_thread(st["active_session"])
+        gc = (ot or {}).get("gap_card") or {}
+        ok = gc.get("status") == "model_only"
+        return ok, f"status after self-verify attempt={gc.get('status')!r}"
+
+    # Phase A2 — progress / probe types / repetition feedback
+    if t == "partial_does_not_force_stuck_scaffold":
+        st = default_state()
+        ensure_subject(st, "physics_demo", title="Physics demo")
+        ensure_concept(st, "physics_demo", "energy_balance")
+        st["active_session"].update({
+            "active": True,
+            "subject_id": "physics_demo",
+            "current_concept_id": "energy_balance",
+            "current_activity": "EXPLANATION",
+            "pending_goal": False,
+            "last_verdict": "partial",
+            "same_activity_streak": 1,
+        })
+        st["subjects"]["physics_demo"]["diagnostic"] = {
+            "status": "done", "turns": 3, "max_turns": 3
+        }
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"],
+            "Why is force A needed rather than force B?",
+            activity="EXPLANATION",
+        )
+        st["active_session"]["open_threads"][-1]["last_probe_type"] = "restate"
+        tutor_mod.apply_learner_signal(st, {"learner_signal": "partial"})
+        pol = suggest_next_activity(st)
+        reason = str(pol.get("reason") or "").lower()
+        ok = (
+            not (pol.get("scaffold") and "stuck" in reason)
+            and (
+                pol.get("probe_type") in ("apply", "contrast", "predict", "missing_piece")
+                or "probe_type" in reason
+                or pol.get("activity") in ("APPLICATION", "TRANSFER", "EXPLANATION")
+            )
+        )
+        # Must not be pure stuck-scaffold restate of the same gap
+        ok = ok and "learner_signal=stuck" not in reason
+        return ok, f"activity={pol.get('activity')} probe={pol.get('probe_type')} reason={reason[:140]}"
+
+    if t == "correct_advances_probe_not_restate":
+        st = default_state()
+        ensure_subject(st, "physics_demo", title="Physics demo")
+        ensure_concept(st, "physics_demo", "energy_balance")
+        st["active_session"].update({
+            "active": True,
+            "subject_id": "physics_demo",
+            "current_concept_id": "energy_balance",
+            "current_activity": "EXPLANATION",
+            "pending_goal": False,
+            "last_verdict": "correct",
+        })
+        st["subjects"]["physics_demo"]["diagnostic"] = {
+            "status": "done", "turns": 3, "max_turns": 3
+        }
+        st["subjects"]["physics_demo"]["concepts"]["energy_balance"].update({
+            "application": 0.2, "transfer": 0.1
+        })
+        tutor_mod.apply_learner_signal(st, {"learner_signal": "correct"})
+        pol = suggest_next_activity(st)
+        reason = str(pol.get("reason") or "").lower()
+        ok = (
+            pol.get("activity") in ("APPLICATION", "TRANSFER", "RETRIEVAL")
+            and "restate" not in str(pol.get("probe_type") or "")
+            and ("probe_type" in reason or pol.get("probe_type") in ("apply", "contrast", "predict"))
+        )
+        return ok, f"activity={pol.get('activity')} probe={pol.get('probe_type')} reason={reason[:120]}"
+
+    if t == "repetition_feedback_policy":
+        import intent_phrases as IP
+        st = default_state()
+        ensure_subject(st, "physics_demo", title="Physics demo")
+        ensure_concept(st, "physics_demo", "energy_balance")
+        st["active_session"].update({
+            "active": True,
+            "subject_id": "physics_demo",
+            "current_concept_id": "energy_balance",
+            "current_activity": "EXPLANATION",
+            "pending_goal": False,
+        })
+        st["subjects"]["physics_demo"]["diagnostic"] = {
+            "status": "done", "turns": 3, "max_turns": 3
+        }
+        tutor_mod.push_or_bump_open_thread(
+            st["active_session"],
+            "Why is the weak interaction needed here?",
+            activity="EXPLANATION",
+        )
+        st["active_session"]["open_threads"][-1]["last_probe_type"] = "restate"
+        # Simulate core.handle_turn phrase path
+        text = "dat heb ik toch net gezegd? waarom stel je exact dezelfde vraag?"
+        assert IP.matches_any(text.lower(), IP.REPETITION_FEEDBACK_PHRASES)
+        st["active_session"]["repetition_feedback"] = True
+        st["active_session"]["must_advance"] = True
+        st["active_session"]["prefer_probe_type"] = tutor_mod.next_probe_type("restate")
+        pol = suggest_next_activity(st)
+        reason = str(pol.get("reason") or "").lower()
+        ok = (
+            bool(pol.get("repetition_feedback") or "repetition" in reason)
+            and pol.get("force") is True
+            and "restate" not in str(pol.get("probe_type") or "apply")
+        )
+        return ok, f"activity={pol.get('activity')} probe={pol.get('probe_type')} reason={reason[:140]}"
+
+    if t == "intent_repetition_phrases":
+        import intent_phrases as IP
+        samples = [
+            "dat heb ik toch net gezegd",
+            "waarom dezelfde vraag",
+            "i just said that",
+            "same question again",
+        ]
+        ok = all(IP.matches_any(s, IP.REPETITION_FEEDBACK_PHRASES) for s in samples)
+        bad = IP.matches_any("geen idee hoe dat werkt", IP.REPETITION_FEEDBACK_PHRASES)
+        ok = ok and not bad
+        return ok, f"all_match={ok} false_positive={bad}"
 
     return False, f"unknown assert type: {t}"
 

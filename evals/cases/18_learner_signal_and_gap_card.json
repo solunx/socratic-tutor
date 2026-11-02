@@ -1,0 +1,40 @@
+{
+  "id": "18_learner_signal_and_gap_card",
+  "description": "Phase A: learner_signal maps to policy flags; gap_card is a plan (model_only); challenges_tutor marks disputed.",
+  "mode": "policy_only",
+  "setup": {
+    "subject_id": "physics_demo",
+    "subject_title": "Physics demo",
+    "goal": "understand a generic energy balance",
+    "concept_id": "energy_balance",
+    "concept_title": "Energy balance",
+    "scores": {
+      "knowledge": 0.4,
+      "retrieval": 0.3,
+      "application": 0.2,
+      "explanation": 0.3,
+      "transfer": 0.1
+    },
+    "current_activity": "EXPLANATION",
+    "prev_activity": "EXPLANATION",
+    "just_resumed": false
+  },
+  "asserts": [
+    {
+      "type": "learner_signal_stuck_policy",
+      "value": true
+    },
+    {
+      "type": "learner_signal_challenge_policy",
+      "value": true
+    },
+    {
+      "type": "gap_card_model_only_default",
+      "value": true
+    },
+    {
+      "type": "gap_card_no_self_verify",
+      "value": true
+    }
+  ]
+}

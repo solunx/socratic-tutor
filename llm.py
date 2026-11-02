@@ -26,7 +26,8 @@ TEMPERATURE = 0.4
 REQUEST_TIMEOUT = 900
 THINK = False
 STREAM = True
-MAX_OUTPUT_TOKENS = 700
+# Phase A adds learner_signal + gap_card; 700 cut JSON mid-object (UI showed raw dump).
+MAX_OUTPUT_TOKENS = 1400
 
 # Terminal tints for CLI live stream (optional)
 BOLD = "[1m"
@@ -231,14 +232,14 @@ def extract_partial_routing_action(buffer):
 
 
 
-def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
+def ask_model(messages, stream=None, on_response_delta=None, live_print=None, think=None, num_predict=None):
     """
     Call Ollama native /api/chat.
     Returns (content: str, stats: dict).
     stats includes streamed=True when the learner-facing response was live-printed
     or pushed via on_response_delta (thread-safe; no function attributes).
     """
-    think_val = _normalize_think(THINK)
+    think_val = _normalize_think(THINK if think is None else think)
     use_stream = STREAM if stream is None else bool(stream)
     if on_response_delta is not None:
         use_stream = True
@@ -253,11 +254,12 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
         "format": "json",
         "options": {
             "temperature": TEMPERATURE,
-            "num_predict": MAX_OUTPUT_TOKENS,
+            "num_predict": int(num_predict or MAX_OUTPUT_TOKENS),
         },
     }
 
     did_stream = False
+    done_reason = None
     t0 = datetime.now()
 
     def _finish_stats(**extra):
@@ -304,6 +306,7 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
             load_s=round(load_ns / 1e9, 3) if load_ns else None,
             ttft_s=round(prompt_ns / 1e9, 3) if prompt_ns else None,
             out_tok_per_s=round(eval_n / eval_s, 1) if eval_s and eval_n else None,
+            done_reason=data.get("done_reason"),
             streamed=False,
         )
         return content, stats
@@ -389,6 +392,7 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
             pass
 
         if data.get("done"):
+            done_reason = data.get("done_reason") or done_reason
             break
 
     if header_shown and live_print:
@@ -405,6 +409,7 @@ def ask_model(messages, stream=None, on_response_delta=None, live_print=None):
     stats = _finish_stats(
         thinking_returned=bool(thinking_text),
         thinking_chars=len(thinking_text),
+        done_reason=done_reason,
         eval_count=eval_count,
         prompt_eval_count=prompt_eval_count,
         total_s=round(total_s, 2) if total_s is not None else None,

@@ -59,3 +59,7 @@ system_prompt.md.bak*
 system_prompt_old.md
 data/
 !data/.gitkeep
+
+# Private lesson notes / company docs (local only)
+knowledge/docs/
+!knowledge/docs/.gitkeep
