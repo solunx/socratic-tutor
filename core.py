@@ -726,11 +726,42 @@ def _handle_command(state: dict, conversation: list, cmd: str, user_id: str | No
             "ok": True,
             "agent": "tutor",
             "kind": "new_subject",
-            "response": f"New subject: {title}. What do you want to achieve with this topic?",
+            "response": f"New subject: {title}. Does that title work (say e.g. 'call it EMS' to rename), and what do you want to achieve?",
             "subject_id": subject_id,
             "subjects": subjects_payload(state),
             "routing": {"action": "new_subject", "subject": subject_id},
             "switched_from_thread": True,
+        }
+
+    if low.startswith("/rename"):
+        new_title = cmd[7:].strip() if len(cmd) > 7 else text.strip()[7:].strip()
+        active = state.get("active_session") or {}
+        sid = active.get("subject_id")
+        if not sid or sid not in state.get("subjects", {}):
+            return {
+                "ok": False,
+                "agent": "tutor",
+                "kind": "error",
+                "response": "Geen actief onderwerp om te hernoemen. Open eerst een onderwerp.",
+            }
+        if not new_title:
+            return {
+                "ok": False,
+                "agent": "tutor",
+                "kind": "error",
+                "response": "Gebruik: /rename <nieuwe titel>   bv. /rename EMS",
+            }
+        new_t = T.rename_subject_title(state, sid, new_title)
+        T.save_state(state, user_id=user_id)
+        return {
+            "ok": True,
+            "agent": "tutor",
+            "kind": "message",
+            "response": f"Onderwerp hernoemd naar «{new_t or new_title}».",
+            "subject_id": sid,
+            "subjects": subjects_payload(state),
+            "summary": state_summary(state),
+            "stats": {"renamed_subject": True},
         }
 
     return None
@@ -883,20 +914,57 @@ def handle_turn(
             "thread_id": "_lobby",
         }
 
-    # Pending goal collection (after /new)
+    # Pending goal collection (after /new) — also allow renaming the subject title first
     active = state.get("active_session") or {}
     if active.get("active") and active.get("pending_goal"):
         sid = active.get("subject_id")
+        rename_to = None
+        try:
+            rename_to = T.parse_subject_rename(text)
+        except Exception:
+            rename_to = None
+        # Pure rename: update title, keep asking for goal (do not start teaching yet)
+        if rename_to and sid and sid in state.get("subjects", {}):
+            # If the whole message is mainly a rename (short / matches pattern), only rename
+            only_rename = (
+                text.strip().lower().startswith("/rename")
+                or len(text.strip()) <= len(rename_to) + 28
+                or text.strip().lower().startswith("het onderwerp is")
+                or text.strip().lower().startswith("noem ")
+                or text.strip().lower().startswith("titel")
+                or text.strip().lower().startswith("call it")
+                or text.strip().lower().startswith("name it")
+            )
+            if only_rename:
+                new_t = T.rename_subject_title(state, sid, rename_to)
+                conversation.append({"role": "user", "content": text})
+                reply = (
+                    f"Ok, onderwerp heet nu «{new_t or rename_to}». "
+                    f"Wat wil je hiermee bereiken?"
+                )
+                conversation.append({"role": "assistant", "content": reply})
+                if save:
+                    T.save_state(state, user_id=user_id)
+                return {
+                    "ok": True,
+                    "agent": "tutor",
+                    "kind": "message",
+                    "response": reply,
+                    "subject_id": sid,
+                    "subjects": subjects_payload(state),
+                    "summary": state_summary(state),
+                    "stats": {"renamed_subject": True},
+                }
+            # Rename + goal in one message: apply both
+            T.rename_subject_title(state, sid, rename_to)
         if sid and sid in state.get("subjects", {}):
             state["subjects"][sid]["goal"] = text[:300]
             state["subjects"][sid]["updated_at"] = datetime.now().isoformat()
         active["pending_goal"] = False
-        # Start prior-knowledge intake for this subject (if not already done)
         if sid and T.subject_needs_diagnostic(state, sid):
             T.begin_subject_diagnostic(state, sid)
         T.save_state(state, user_id=user_id) if save else None
-        # Fall through to first turn: diagnostic (policy) or teaching
-        text = f"Ik wil leren over dit onderwerp. Leerdoel: {text}"
+        # Fall through — learner text unchanged in history
 
     base_prompt = T.load_system_prompt()
     conversation.append({"role": "user", "content": text})
@@ -1256,6 +1324,36 @@ def handle_turn(
         return _quiet_switch(state, conversation, best_id, user_id=user_id)
 
     if action == "new_subject":
+        # Mid-session: sub-topics (e.g. EV Boost within EMS) stay on the current subject
+        # unless the learner clearly asked for a separate new subject (/new, "nieuw onderwerp").
+        _act_now = state.get("active_session") or {}
+        _msg_l = (text or "").lower()
+        _explicit_new = (
+            _msg_l.startswith("/new")
+            or "nieuw onderwerp" in _msg_l
+            or "andere subject" in _msg_l
+            or "ander onderwerp" in _msg_l
+            or "start a new subject" in _msg_l
+        )
+        if _act_now.get("active") and _act_now.get("subject_id") and not _explicit_new:
+            action = "continue"
+            routing = dict(routing or {})
+            routing["action"] = "continue"
+            routing["_blocked_new_subject"] = True
+            if isinstance(result, dict):
+                result["routing"] = routing
+            # Model often returns empty response for new_subject — fill a continue line
+            if not (answer or "").strip():
+                answer = (
+                    "We blijven bij het huidige onderwerp; modes en settings horen daarbij. "
+                    "Waar wil je nu precies op inzoomen?"
+                )
+                if isinstance(result, dict):
+                    result["response"] = answer
+            stats = dict(stats or {})
+            stats["blocked_new_subject"] = True
+
+    if action == "new_subject":
         title = routing.get("proposed_title") or routing.get("subject")
         if not title or len(str(title).strip()) > 60:
             if save:
@@ -1290,7 +1388,7 @@ def handle_turn(
             "ok": True,
             "agent": "tutor",
             "kind": "new_subject",
-            "response": f"Nieuw onderwerp: {title}. Wat wil je hiermee bereiken?",
+            "response": f"Nieuw onderwerp: {title}. Klopt die titel (zeg bv. 'het onderwerp is EMS' om te hernoemen), en wat wil je hiermee bereiken?",
             "subject_id": subject_id,
             "subjects": subjects_payload(state),
             "stats": stats,
@@ -1429,6 +1527,14 @@ def handle_turn(
             foot = format_sources_footer(_evidence)
             if foot and answer and "Bronnen:" not in answer:
                 answer = answer.rstrip() + foot
+            if _sources and conversation:
+                last = conversation[-1]
+                if isinstance(last, dict) and last.get("role") == "assistant":
+                    last["sources"] = list(_sources)
+                    import re as _re
+                    body = str(last.get("content") or "")
+                    body = _re.sub(r"\n*—\s*\nBronnen:[\s\S]*$", "", body).strip()
+                    last["content"] = body
     except Exception:
         logger.exception("evidence footer failed")
 

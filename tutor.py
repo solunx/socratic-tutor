@@ -844,6 +844,55 @@ def resolve_subject_id(state, subject_id, title=None):
     return sid or ""
 
 
+
+def rename_subject_title(state, subject_id: str, new_title: str) -> str | None:
+    """Update display title for an existing subject. Keeps id stable; old title → alias."""
+    sid = normalize_id(subject_id) if subject_id else None
+    if not sid or sid not in state.get("subjects", {}):
+        return None
+    title = short_subject_title(str(new_title or "").strip())
+    if not title or title == "general":
+        return None
+    sub = state["subjects"][sid]
+    old = str(sub.get("title") or "").strip()
+    sub["title"] = title
+    sub["updated_at"] = datetime.now().isoformat()
+    aliases = list(sub.get("aliases") or [])
+    if old and old.lower() != title.lower() and old not in aliases:
+        aliases.append(old)
+    # also keep short forms
+    if title not in aliases:
+        pass
+    sub["aliases"] = aliases[-12:]
+    return title
+
+
+def parse_subject_rename(text: str) -> str | None:
+    """If the learner is mainly renaming the subject, return the new title; else None."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    low = raw.lower().strip()
+    # /rename EMS
+    if low.startswith("/rename"):
+        rest = raw[7:].strip().lstrip(":").strip()
+        return short_subject_title(rest) if rest else None
+    patterns = [
+        r"(?i)^(?:het\s+)?onderwerp\s+is\s+[:\s]*(.+)$",
+        r"(?i)^(?:noem|noemen|hernoem|hernoemen)\s+(?:het\s+)?(?:onderwerp\s+)?(?:naar\s+|als\s+)?(.+)$",
+        r"(?i)^(?:titel|title)\s*[:=]\s*(.+)$",
+        r"(?i)^(?:liever|liever noemen)\s+(.+)$",
+        r"(?i)^(?:call it|name it|rename (?:it|to)|title)\s*[:=]?\s*(.+)$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, raw.strip())
+        if m:
+            cand = short_subject_title(m.group(1).strip().strip(chr(34) + chr(39)))
+            if cand and cand != "general" and len(cand) <= 60:
+                return cand
+    return None
+
+
 def ensure_subject(state, subject_id, title=None, parent_id=None):
     """
     Ensure a subject exists. Never create subjects from invalid or empty IDs.

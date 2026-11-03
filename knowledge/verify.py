@@ -20,12 +20,12 @@ def _wiki_enabled_default() -> bool:
 def evidence_for(
     claim: str,
     *,
-    max_snippets: int = 4,
+    max_snippets: int = 2,
     wiki_chars: int = 900,
     local_chars: int = 700,
     use_wiki: bool | None = None,
     use_local: bool = True,
-    min_local_score: float = 2.0,
+    min_local_score: float = 2.5,
 ) -> dict[str, Any]:
     """
     Build an evidence pack for a claim / topic string (any subject).

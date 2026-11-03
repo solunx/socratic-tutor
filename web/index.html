@@ -261,7 +261,35 @@
 
     function renderHistory(hist) {
       clearLog();
-      (hist || []).forEach((h) => addBubble(h.role, h.text));
+      let lastRole = null, lastText = null;
+      (hist || []).forEach((h) => {
+        const role = h.role;
+        let text = (h.text || "").trim();
+        // Client-side strip if an old stored footer slipped through
+        const cut = text.search(/\n—\s*\nBronnen:/);
+        if (cut >= 0) text = text.slice(0, cut).trim();
+        if (!text) return;
+        if (role === lastRole && text === lastText) return;
+        if (
+          role === "tutor" && lastRole === "tutor" && lastText &&
+          (text.indexOf(lastText) === 0 || lastText.indexOf(text) === 0) &&
+          Math.min(text.length, lastText.length) > 40
+        ) {
+          // Replace previous bubble body with longer/cleaner text
+          const nodes = log.querySelectorAll(".bubble.tutor");
+          const last = nodes[nodes.length - 1];
+          if (last) {
+            const body = last.querySelector(".body");
+            if (body && text.length >= lastText.length) body.textContent = text;
+          }
+          lastText = text.length >= (lastText || "").length ? text : lastText;
+          return;
+        }
+        const b = addBubble(role, text);
+        if (role === "tutor" && h.sources) renderSources(b, h.sources);
+        lastRole = role;
+        lastText = text;
+      });
     }
 
     function renderSubjects(list) {
@@ -537,8 +565,12 @@
       if (data.thread_id) setActiveSubject(data.thread_id);
 
       // NL switch / resume: show per-subject chat history (same as sidebar)
+      // Full history replace only on real thread switch / resume — not every turn
+      // (re-drawing history after stream caused duplicate tutor bubbles on some clients).
       if (Array.isArray(data.history) && data.thread_id && data.kind !== "subjects") {
-        if (data.thread_id !== prevThread || data.kind === "resume") {
+        const switched = data.thread_id !== prevThread;
+        const isResume = data.kind === "resume";
+        if ((switched || isResume) && !opts.streamedBody) {
           renderHistory(data.history);
         }
       }
@@ -709,29 +741,23 @@
         }
 
         if (finalData) {
-          handleResult(finalData, { streamedBody: streamed && !isCmd });
-          // Prefer final response (may include Python-owned Bronnen footer not present in stream tokens)
-          if (streamed && finalData.response && bodyEl) {
-            const finalTxt = String(finalData.response || "");
-            const live = (bodyEl.textContent || "").trim();
-            if (!live || finalTxt.length > live.length + 5 || finalTxt.indexOf("Bronnen:") >= 0) {
-              // Strip plain-text footer if we also render structured sources
-              let show = finalTxt;
-              if (Array.isArray(finalData.sources) && finalData.sources.length) {
-                const idx = show.indexOf("\n—\nBronnen:");
-                if (idx >= 0) show = show.slice(0, idx).trimEnd();
-                const idx2 = show.indexOf("\nBronnen:");
-                if (idx2 >= 0 && show.indexOf("—") >= Math.max(0, idx2 - 5)) {
-                  /* keep body without duplicate footer when structured block exists */
-                }
-                const cut = show.search(/\n—\s*\nBronnen:/);
-                if (cut >= 0) show = show.slice(0, cut).trimEnd();
-              }
-              bodyEl.textContent = show;
-              renderSources(tutorBubble, finalData.sources);
-            }
-          } else if (finalData.sources && tutorBubble) {
+          // Always treat as streamed if we already drew a tutor bubble this turn
+          // (prevents a second identical bubble on mobile / partial stream).
+          const didStream = !!(streamed && tutorBubble);
+          handleResult(finalData, { streamedBody: didStream || (streamed && !isCmd) });
+          let show = String(finalData.response || "");
+          if (Array.isArray(finalData.sources) && finalData.sources.length) {
+            const cut = show.search(/\n—\s*\nBronnen:/);
+            if (cut >= 0) show = show.slice(0, cut).trimEnd();
+          }
+          if (didStream && bodyEl) {
+            if (show.trim()) bodyEl.textContent = show;
             renderSources(tutorBubble, finalData.sources);
+          } else if (!didStream && finalData.sources) {
+            // Non-stream path: handleResult created the bubble; attach sources to last tutor
+            const bubbles = log.querySelectorAll(".bubble.tutor");
+            const last = bubbles[bubbles.length - 1];
+            if (last) renderSources(last, finalData.sources);
           }
           statusEl.textContent = subjectTitle(finalData.thread_id) || finalData.thread_id || "Klaar";
         }

@@ -88,7 +88,7 @@ def gather_turn_evidence(state: dict | None, learner_text: str, *, tutor_mod=Non
         q = query_for_turn(state, learner_text, tutor_mod=tutor_mod)
         if not q:
             return empty
-        pack = evidence_for(q, max_snippets=3)
+        pack = evidence_for(q, max_snippets=2)
         pack["enabled"] = True
         pack["query"] = q
         return pack
@@ -106,13 +106,20 @@ def sources_payload(pack: dict[str, Any] | None) -> list[dict[str, Any]]:
         quote = re.sub(r"\s+", " ", str(s.get("text") or "")).strip()[:220]
         url = s.get("url")
         src = s.get("source") or ""
-        # Clickable local docs via gateway (authenticated)
-        if not url and src.startswith("local:"):
+        rel = None
+        # Clickable local docs via gateway (authenticated); label = filename
+        if src.startswith("local:"):
             rel = src[len("local:"):].lstrip("/")
-            url = "/api/v1/knowledge-doc?path=" + rel
+            if not url:
+                url = "/api/v1/knowledge-doc?path=" + rel
+        # Prefer filename (ems.md) over markdown H1 for the visible source label
+        if rel:
+            label = rel.split("/")[-1]
+        else:
+            label = s.get("title") or s.get("source")
         out.append({
             "kind": s.get("kind") or "unknown",
-            "title": s.get("title") or s.get("source"),
+            "title": label,
             "source": s.get("source"),
             "url": url,
             "quote": quote or None,

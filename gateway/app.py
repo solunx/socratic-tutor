@@ -496,6 +496,15 @@ def _get_thread(store: dict, thread_id: str) -> list:
     return threads[tid]
 
 
+def _strip_sources_footer(text: str) -> str:
+    """Remove Python-owned Bronnen footer from stored/displayed message body."""
+    import re
+    t = (text or "").strip()
+    t = re.sub(r"\n*—\s*\nBronnen:[\s\S]*$", "", t).strip()
+    t = re.sub(r"\n*Bronnen:\s*\n[\s\S]*$", "", t).strip()
+    return t
+
+
 def _history_for_ui(conv: list) -> list[dict]:
     out = []
     for m in conv[-MAX_CONV_MESSAGES:]:
@@ -506,15 +515,41 @@ def _history_for_ui(conv: list) -> list[dict]:
         if not content:
             continue
         if role == "user":
-            out.append({"role": "you", "text": content})
+            item = {"role": "you", "text": content}
         elif role == "assistant":
-            out.append({"role": "tutor", "text": content})
+            item = {"role": "tutor", "text": _strip_sources_footer(content)}
+            src = m.get("sources")
+            if isinstance(src, list) and src:
+                item["sources"] = src
         elif role == "system":
             if "[session boundary" in content:
-                out.append({"role": "system", "text": "— onderwerp gewisseld —"})
+                item = {"role": "system", "text": "— onderwerp gewisseld —"}
             elif content.startswith("Hervat:") or "Leerdoel:" in content:
-                # Resume banner persisted on the thread
-                out.append({"role": "system", "text": content.replace(" | ", "\n")})
+                item = {"role": "system", "text": content.replace(" | ", "\n")}
+            else:
+                continue
+        else:
+            continue
+        # Drop consecutive duplicates (same role + same body) — e.g. after flaky mobile reconnect
+        if out:
+            prev = out[-1]
+            if prev.get("role") == item["role"] and prev.get("text") == item["text"]:
+                continue
+            # Near-duplicate tutor lines (one with footer residue, one without)
+            if (
+                item["role"] == "tutor"
+                and prev.get("role") == "tutor"
+                and (
+                    prev["text"] in item["text"]
+                    or item["text"] in prev["text"]
+                )
+                and min(len(prev["text"]), len(item["text"])) > 40
+            ):
+                # Keep the longer clean version
+                if len(item["text"]) > len(prev["text"]):
+                    out[-1] = item
+                continue
+        out.append(item)
     return out
 
 
@@ -1031,7 +1066,7 @@ def turn_stream(request: Request, req: TurnRequest):
         }
         # handle_turn mutates `conv` in place (user+assistant). Re-get in case of switch later.
         # Defensive: if assistant reply missing on this thread, append it so refresh keeps history.
-        resp_txt = (result.get("response") or "").strip()
+        resp_txt = _strip_sources_footer((result.get("response") or "").strip())
         if resp_txt and result.get("kind") in ("message", "resume", None, ""):
             last = conv[-1] if conv else None
             last_c = str((last or {}).get("content") or "").strip() if isinstance(last, dict) else ""
@@ -1064,7 +1099,18 @@ def turn_stream(request: Request, req: TurnRequest):
                     and conv[-1].get("role") == "assistant"
                     and str(conv[-1].get("content") or "").strip() == resp_txt
                 ):
-                    conv.append({"role": "assistant", "content": resp_txt})
+                    entry = {"role": "assistant", "content": resp_txt}
+                    if isinstance(result.get("sources"), list) and result.get("sources"):
+                        entry["sources"] = result["sources"]
+                    conv.append(entry)
+                elif (
+                    conv
+                    and isinstance(conv[-1], dict)
+                    and conv[-1].get("role") == "assistant"
+                    and isinstance(result.get("sources"), list)
+                    and result.get("sources")
+                ):
+                    conv[-1]["sources"] = result["sources"]
         state2 = T.load_state(user_id=sid)
         if result.get("kind") == "lobby":
             tid = LOBBY
