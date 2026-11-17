@@ -32,18 +32,34 @@ An open thread may carry a **gap card**: learning *plan*, not a certificate of t
 
 Pedagogy can advance while a gap remains `model_only` (learning progress ≠ verified fact).
 
-## Evidence (local docs + optional Wikipedia)
+## Evidence / retrieval (separate capability)
 
-Package: `knowledge/`
+Package: `knowledge/` — **not** tutor-only. Other agents should use the same module.
 
-- **Local:** keyword search over `knowledge/docs/` (private lesson notes; not required in git).
-- **Wikipedia:** optional; failures must not break the turn (`wiki_ok=False`).
-- **Offline:** local-only or empty pack; tutor continues without sources.
-- **Injection:** short SOURCE EVIDENCE block in the system prompt when hits exist.
-- **Attribution:** structured `sources` on the API message (e.g. `ems.md`); UI may show a sources block.
-- **No topic tables** in code: queries are built from the current gap, concept, and learner text.
+| Surface | Who uses it |
+|---------|-------------|
+| `knowledge.api.retrieve(query)` | Any agent: grounded snippets |
+| `knowledge.api.retrieve_local(query)` | Offline / local-only |
+| `knowledge.turn_evidence.gather_turn_evidence(...)` | **Tutor only** (session → query + UI footer) |
+| `knowledge.focus` | **Tutor only** (learner focus phrase) |
 
-Embeddings / full RAG are a later step behind the same `evidence_for()` idea.
+- **Local:** search over `knowledge/docs/` (or `TUTOR_KNOWLEDGE_DIR`); section-oriented chunks.
+- **Wikipedia:** optional; failures set `wiki_ok=False` and do not break the turn.
+- **Offline:** local-only or empty pack; caller continues without sources.
+- **Contract:** see `knowledge/README.md`. Backends may later use BM25/embeddings **behind** `api.retrieve` without changing agents.
+- **Attribution:** Python-owned `sources` on the API message; model does not invent URLs.
+
+## Capability modules (plug-in view)
+
+| Module | Role | Consumers |
+|--------|------|-----------|
+| `knowledge/` | Retrieval + evidence packs | Tutor, future agents |
+| `gateway/` | Auth, HTTP API, multi-user | Web UI, clients |
+| `web/` | Browser UI | Humans |
+| `core` / `policy` / `tutor` | Socratic loop, gates, state | Tutor product only |
+| `sim/` | Behaviour lab / student agents | Evaluation |
+
+Shared infrastructure (retrieval, gateway) should stay free of tutor pedagogy so new agents can attach without forking the stack.
 
 ## Subjects
 
@@ -61,3 +77,9 @@ Embeddings / full RAG are a later step behind the same `evidence_for()` idea.
 
 - Per-user events and metrics tools under `tools/` (e.g. `tail_events`, cache probes).
 - Contract tests under `tests/` guard policy and evidence behaviour without requiring a live GPU.
+
+## Focus mode and subject choice (incremental)
+
+- **Focus mode:** if the learner names a mode (e.g. Eco, EV Boost), `active_session.focus_mode` is set. Policy appends a FOCUS MODE line so the model stays on that mode’s rules.
+- **Subject choice:** when the model proposes `new_subject` mid-session without an explicit `/new`, the tutor asks stay / switch to match / create new (with optional parent link) instead of deciding silently.
+- Local evidence prefers paths matching the current subject/mode tokens; `archive/` folders under `knowledge/docs` are skipped.

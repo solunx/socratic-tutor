@@ -52,14 +52,18 @@ learner_state.json.lock
 # Multi-user data (private)
 data/
 !data/.gitkeep
-learner_state_full*.json
+
+# Backups / local dumps
 *.bak
 *.bak-*
 system_prompt.md.bak*
 system_prompt_old.md
-data/
-!data/.gitkeep
+learner_state_full*.json
+metrics/
 
-# Private lesson notes / company docs (local only)
+# simulation batch outputs
+sim/runs/
+
+# private lesson notes
 knowledge/docs/
-!knowledge/docs/.gitkeep
+

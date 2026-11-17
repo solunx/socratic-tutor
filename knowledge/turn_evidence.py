@@ -55,6 +55,10 @@ def query_for_turn(state: dict | None, learner_text: str, *, tutor_mod=None) -> 
     if msg:
         parts.append(msg[:280])
 
+    fm = act.get("focus_mode") if isinstance(act.get("focus_mode"), dict) else None
+    if fm and fm.get("label"):
+        parts.insert(0, str(fm["label"]))
+
     # de-dupe similar chunks
     seen: set[str] = set()
     uniq: list[str] = []
@@ -88,9 +92,15 @@ def gather_turn_evidence(state: dict | None, learner_text: str, *, tutor_mod=Non
         q = query_for_turn(state, learner_text, tutor_mod=tutor_mod)
         if not q:
             return empty
-        pack = evidence_for(q, max_snippets=2)
+        try:
+            from knowledge.focus import path_boost_tokens
+            boosts = path_boost_tokens(state, learner_text)
+        except Exception:
+            boosts = []
+        pack = evidence_for(q, max_snippets=2, path_boosts=boosts or None)
         pack["enabled"] = True
         pack["query"] = q
+        pack["path_boosts"] = boosts
         return pack
     except Exception:
         logger.exception("gather_turn_evidence failed")
@@ -98,21 +108,36 @@ def gather_turn_evidence(state: dict | None, learner_text: str, *, tutor_mod=Non
 
 
 def sources_payload(pack: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """UI-friendly source list (only real retrieval hits)."""
+    """UI-friendly source list (only real retrieval hits).
+
+    Multiple chunks from the same document collapse to one footer line
+    (dedupe by source / local path). Quotes from extra chunks are dropped
+    from the UI list; the prompt still receives all snippets.
+    """
     if not pack or not pack.get("snippets"):
         return []
     out = []
-    for s in pack["snippets"][:4]:
+    seen: set[str] = set()
+    for s in pack["snippets"][:6]:
+        src = (s.get("source") or "").strip()
+        # Dedupe key: local path or full source id
+        if src.startswith("local:"):
+            key = "local:" + src[len("local:"):].lstrip("/").lower()
+        elif src:
+            key = src.lower()
+        else:
+            key = (s.get("url") or s.get("title") or str(id(s))).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
         quote = re.sub(r"\s+", " ", str(s.get("text") or "")).strip()[:220]
         url = s.get("url")
-        src = s.get("source") or ""
         rel = None
-        # Clickable local docs via gateway (authenticated); label = filename
         if src.startswith("local:"):
             rel = src[len("local:"):].lstrip("/")
             if not url:
                 url = "/api/v1/knowledge-doc?path=" + rel
-        # Prefer filename (ems.md) over markdown H1 for the visible source label
         if rel:
             label = rel.split("/")[-1]
         else:
@@ -124,6 +149,8 @@ def sources_payload(pack: dict[str, Any] | None) -> list[dict[str, Any]]:
             "url": url,
             "quote": quote or None,
         })
+        if len(out) >= 4:
+            break
     return out
 
 

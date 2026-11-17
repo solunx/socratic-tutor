@@ -90,3 +90,82 @@ def test_format_evidence_for_prompt():
 def test_wiki_empty_query():
     assert W.search_titles("") == []
     assert W.fetch_extract("") is None
+
+
+def test_split_into_chunks_finds_later_section():
+    """Late content must become its own chunk (not only document prefix)."""
+    text = (
+        "# Intro\n\n"
+        + ("Filler about solar panels and grid import. " * 40)
+        + "\n\n## EV Boost rules\n\n"
+        "EV Boost zonder import ontlaadt de packs tot de ingestelde rest. "
+        "Er is geen 6A startdrempel op zon in deze mode.\n"
+    )
+    chunks = LD.split_into_chunks(text)
+    assert len(chunks) >= 2
+    joined = " ".join(c["text"] for c in chunks)
+    assert "EV Boost" in joined
+    assert any("EV Boost" in (c.get("text") or "") for c in chunks)
+
+
+def test_search_local_returns_late_chunk_not_only_prefix(tmp_path, monkeypatch):
+    """Query about a late section must not return only the document head."""
+    long_doc = tmp_path / "long_manual.md"
+    head = "# Manual\n\n" + ("Alpha topic about batteries and solar eco mode. " * 50)
+    tail = (
+        "\n\n## Night discharge mode\n\n"
+        "Night discharge mode empties packs to the configured remainder without grid import. "
+        "Minimum pack floor is twenty percent before discharge stops.\n"
+    )
+    long_doc.write_text(head + tail, encoding="utf-8")
+
+    def fake_load():
+        return [{
+            "id": "long_manual.md",
+            "path": str(long_doc),
+            "title": "Manual",
+            "text": long_doc.read_text(encoding="utf-8"),
+            "source": "local:long_manual.md",
+        }]
+
+    monkeypatch.setattr(LD, "load_all", fake_load)
+    hits = LD.search_local("night discharge packs remainder without grid import", limit=3)
+    assert hits, "expected a hit on the late section"
+    blob = " ".join(h["text"] for h in hits).lower()
+    assert "night discharge" in blob or "remainder" in blob
+    # Must not be only the alpha/eco prefix
+    assert "twenty percent" in blob or "grid import" in blob
+
+
+def test_search_local_short_doc_still_works():
+    hits = LD.search_local("deuterium helium-3 zwakke wisselwerking", limit=2)
+    assert hits
+    assert any("pp" in (h.get("source") or "").lower() for h in hits)
+
+
+def test_api_retrieve_alias_matches_evidence_for():
+    from knowledge.api import retrieve, evidence_for, retrieve_local
+    a = retrieve("pp-keten deuterium", max_snippets=2, use_wiki=False)
+    b = evidence_for("pp-keten deuterium", max_snippets=2, use_wiki=False)
+    assert a["status"] == b["status"]
+    assert len(a.get("snippets") or []) == len(b.get("snippets") or [])
+    loc = retrieve_local("pp-keten", limit=2)
+    assert loc.get("wiki_ok") is False or loc.get("status") in ("found", "weak", "not_found")
+
+
+def test_excerpt_centers_on_query_not_prefix():
+    from knowledge.chunking import excerpt_for_query
+    # Decisive phrase near the end; prefix is noise
+    body = ("Eco intro " * 40) + "EV Boost zonder import ontlaadt de packs tot de ingestelde rest. " + ("tail " * 20)
+    out = excerpt_for_query(body, "EV Boost zonder import packs", max_chars=120)
+    assert "EV Boost" in out or "Boost" in out
+    assert "ontlaadt" in out or "packs" in out
+
+
+def test_split_respects_headings():
+    from knowledge.chunking import split_into_chunks
+    md = "# Title\n\nIntro para.\n\n## Boost-staat\n\nEV Boost zonder import ontlaadt de packs.\n\n## Eco\n\nGewone eco op zon.\n"
+    chunks = split_into_chunks(md, max_chars=200)
+    texts = " ".join(c["text"] for c in chunks)
+    assert "EV Boost" in texts
+    assert any("Boost" in (c.get("heading") or "") or "Boost" in c["text"] for c in chunks)

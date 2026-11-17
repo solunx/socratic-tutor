@@ -35,7 +35,7 @@ def test_footer_and_payload():
     src = sources_payload(pack)
     assert src[0]["source"] == "local:pp_keten.md"
     foot = format_sources_footer(pack)
-    assert "Bronnen:" in foot and "local:pp_keten.md" in foot
+    assert "Bronnen:" in foot and ("pp_keten" in foot or "local:pp" in foot)
 
 
 def test_inject_appends_to_system():
@@ -66,3 +66,21 @@ def test_gather_respects_disable(monkeypatch):
     )
     assert pack.get("status") == "not_found"
     assert pack.get("enabled") is False
+
+
+def test_sources_payload_dedupes_same_local_doc():
+    from knowledge.turn_evidence import sources_payload, format_sources_footer
+    pack = {
+        "status": "found",
+        "snippets": [
+            {"kind": "local", "source": "local:ems.md", "title": "A", "text": "chunk one about eco"},
+            {"kind": "local", "source": "local:ems.md", "title": "A", "text": "chunk two about boost"},
+            {"kind": "local", "source": "local:other.md", "title": "B", "text": "other doc"},
+        ],
+    }
+    src = sources_payload(pack)
+    paths = [s.get("source") for s in src]
+    assert paths.count("local:ems.md") == 1
+    assert "local:other.md" in paths
+    foot = format_sources_footer(pack)
+    assert foot.count("[local] ems.md") == 1

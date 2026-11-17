@@ -26,6 +26,7 @@ def evidence_for(
     use_wiki: bool | None = None,
     use_local: bool = True,
     min_local_score: float = 2.5,
+    path_boosts: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Build an evidence pack for a claim / topic string (any subject).
@@ -55,7 +56,7 @@ def evidence_for(
     # --- local first (always available offline) ---
     if use_local and claim:
         try:
-            hits = local_docs.search_local(claim, limit=max_snippets, snippet_chars=local_chars)
+            hits = local_docs.search_local(claim, limit=max_snippets, snippet_chars=local_chars, path_boosts=path_boosts)
             for hit in hits:
                 if float(hit.get("score") or 0) < min_local_score:
                     continue
