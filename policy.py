@@ -103,10 +103,10 @@ def _suggest_next_activity_core(state):
     # from the previous turn (the one-turn lag seen in the vriend1 event log).
     _judge = active.get("judge") if isinstance(active.get("judge"), dict) else None
     _jv = str((_judge or {}).get("verdict") or "").lower()
-    if _jv in ("correct", "partial", "incorrect", "uncertain"):
+    if _jv in ("correct", "partial", "incorrect", "uncertain", "off_target"):
         # impartial judge > the tutor's own (key-biased) verdict and > flags left over from the previous turn
         active["turn_correctness"] = {"correct": "correct", "partial": "partial",
-                                      "incorrect": "incorrect", "uncertain": "unknown"}[_jv]
+                                      "incorrect": "incorrect", "uncertain": "unknown", "off_target": "partial"}[_jv]
         if _jv == "correct":
             active.update(last_verdict="correct", last_learner_signal="correct", partial_missing=False,
                           stuck_signal=False, force_scaffold=False, confused_by_tutor=False)
@@ -114,6 +114,8 @@ def _suggest_next_activity_core(state):
             active.update(last_verdict="partial", partial_missing=True)
         elif _jv == "incorrect":
             active.update(last_verdict="incorrect")
+        elif _jv == "off_target":     # true but not an answer: NOT a missing piece, NOT a failure
+            active.update(last_verdict="partial", partial_missing=False, stuck_signal=False)
     intent = str(active.get("turn_intent") or "").strip().lower()
     corr = str(active.get("turn_correctness") or "").strip().lower()
     if intent:
@@ -735,15 +737,49 @@ def judge_directive(j):
     if v == "uncertain":
         return (_JUDGE_HEAD + f"UNCERTAIN ({why}). Do not call the answer right or wrong. Ask how they arrived at it."
                 + _JUDGE_TAIL)
+    if v == "off_target":
+        return (_JUDGE_HEAD + f"the learner's statement is TRUE ({why}) but it does not answer your question. FIRST sentence: "
+                "confirm it specifically (say what exactly they got right). Then connect it to your question in ONE step: ask a "
+                "question that builds on THEIR statement. Do NOT repeat or rephrase your previous question; it is not a missing "
+                "piece and not a mistake." + _JUDGE_TAIL)
     return ""
+
+
+def thread_directive(streak):
+    if int(streak or 0) < 2:
+        return ""
+    return (f"LEARNER THREAD: the learner has answered something other than your question {int(streak)} times in a row, each "
+            "time with a valid point of their own. DROP your current line of questions for good (no rephrase, no 'missing piece'). "
+            "FIRST confirm what they just said (say specifically what is right). Then ask ONE question that follows THEIR thread: "
+            "build on the point they just made. Do NOT offer to end, summarise or wrap up the session, and do NOT offer a menu of "
+            "choices, unless the learner asked for that.")
 
 
 def suggest_next_activity(state):
     p = _suggest_next_activity_core(state)
-    j = ((state or {}).get("active_session") or {}).get("judge")
+    if not isinstance(p, dict):
+        return p
+    p = dict(p)
+    _act5 = (state or {}).get("active_session") or {}
+    j = _act5.get("judge")
     d = judge_directive(j) if isinstance(j, dict) else ""
-    if d and isinstance(p, dict) and p.get("reason") is not None:
-        p = dict(p)
-        p["judge"] = dict(j)
-        p["reason"] = f"{p['reason']} | {d}"
+    t = thread_directive(_act5.get("off_target_streak"))
+    if (d or t) and p.get("reason") is not None:
+        if isinstance(j, dict):
+            p["judge"] = dict(j)
+        p["off_target_streak"] = int(_act5.get("off_target_streak") or 0)
+        ds = " ".join(x for x in (d, t) if x)
+        if t or (isinstance(j, dict) and j.get("verdict") == "off_target"):
+            # these directives REPLACE the base probe instruction (which would ask the same question again)
+            p["reason"] = f"{ds} | BASE POLICY (secondary; ignore any instruction in it to re-ask the same question): {p['reason']}"
+        else:
+            p["reason"] = f"{p['reason']} | {ds}"
+    try:
+        from knowledge.focus import focus_policy_line
+        fl = focus_policy_line(state)
+        if fl and p.get("reason") is not None:
+            p["reason"] = f"{p['reason']} | {fl}"
+            p["focus_mode"] = ((state or {}).get("active_session") or {}).get("focus_mode")
+    except Exception:
+        pass
     return p

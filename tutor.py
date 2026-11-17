@@ -401,6 +401,20 @@ def _resolve_uid(state, user_id: str | None = None) -> str:
     return DEFAULT_USER_ID
 
 
+import contextvars as _contextvars
+_PERSIST = _contextvars.ContextVar("tutor_persist", default=True)
+
+
+def set_persistence(on):
+    """core.handle_turn(save=False) switches ALL state writes off for the duration of the turn (every path, incl. quiet
+    switches / session starts). A ContextVar, not a global: another request thread keeps writing normally."""
+    return _PERSIST.set(bool(on))
+
+
+def reset_persistence(token):
+    _PERSIST.reset(token)
+
+
 def save_state(state, user_id: str | None = None):
     """Persist learner state with an exclusive file lock (CLI + web safe).
 
@@ -408,6 +422,8 @@ def save_state(state, user_id: str | None = None):
     If omitted, uses state['learner']['id'] (never silently DEFAULT_USER_ID
     when the blob already belongs to someone else).
     """
+    if not _PERSIST.get():
+        return
     try:
         hygiene_misconceptions(state)
     except Exception:
@@ -868,15 +884,59 @@ def rename_subject_title(state, subject_id: str, new_title: str) -> str | None:
 
 
 def parse_subject_rename(text: str) -> str | None:
-    """If the learner is mainly renaming the subject, return the new title; else None."""
+    """If the learner is mainly renaming the *active* subject, return the new title."""
+    pair = parse_subject_rename_pair(text)
+    if pair and pair[1] and not pair[0]:
+        return pair[1]
+    if pair and pair[1] and pair[0]:
+        return pair[1]
+    return None
+
+
+def parse_subject_rename_pair(text: str) -> tuple[str | None, str | None] | None:
+    """Return (old_title_or_None, new_title) for rename intents, else None.
+
+    Supports:
+      /rename EMS
+      /rename EMS Eco Wet -> EMS
+      /rename EMS Eco Wet | EMS
+      het onderwerp is EMS
+      hernoem EMS Eco Wet naar EMS
+      naam van EMS Eco Wet wijzigen naar EMS
+    """
     raw = (text or "").strip()
     if not raw:
         return None
     low = raw.lower().strip()
-    # /rename EMS
+
     if low.startswith("/rename"):
         rest = raw[7:].strip().lstrip(":").strip()
-        return short_subject_title(rest) if rest else None
+        if not rest:
+            return None
+        for sep in ("->", "→", "|", " naar ", " to "):
+            if sep in rest:
+                a, b = rest.split(sep, 1)
+                old_t = a.strip().strip(chr(34) + chr(39))
+                new_t = short_subject_title(b.strip().strip(chr(34) + chr(39)))
+                if new_t and new_t != "general":
+                    return (old_t or None, new_t)
+        return (None, short_subject_title(rest))
+
+    patterns_pair = [
+        r"(?i)^(?:de\s+)?naam\s+van\s+(?:het\s+)?onderwerp\s+(.+?)\s+(?:wijzigen|veranderen|aanpassen)\s+naar\s+(.+)$",
+        r"(?i)^(?:de\s+)?naam\s+van\s+(.+?)\s+(?:wijzigen|veranderen|aanpassen)\s+naar\s+(.+)$",
+        r"(?i)^(?:hernoem|hernoemen|noem)\s+(.+?)\s+naar\s+(.+)$",
+        r"(?i)^rename\s+(.+?)\s+to\s+(.+)$",
+        r"(?i)^(?:ik\s+wil\s+)?(?:de\s+)?naam\s+van\s+(.+?)\s+(?:onderwerp\s+)?(?:wijzigen|veranderen)\s+naar\s+(.+)$",
+    ]
+    for pat in patterns_pair:
+        m = re.match(pat, raw.strip())
+        if m:
+            old_t = m.group(1).strip().strip(chr(34) + chr(39))
+            new_t = short_subject_title(m.group(2).strip().strip(chr(34) + chr(39)))
+            if new_t and new_t != "general":
+                return (old_t, new_t)
+
     patterns = [
         r"(?i)^(?:het\s+)?onderwerp\s+is\s+[:\s]*(.+)$",
         r"(?i)^(?:noem|noemen|hernoem|hernoemen)\s+(?:het\s+)?(?:onderwerp\s+)?(?:naar\s+|als\s+)?(.+)$",
@@ -889,7 +949,35 @@ def parse_subject_rename(text: str) -> str | None:
         if m:
             cand = short_subject_title(m.group(1).strip().strip(chr(34) + chr(39)))
             if cand and cand != "general" and len(cand) <= 60:
-                return cand
+                return (None, cand)
+    return None
+
+
+def resolve_subject_for_rename(state, hint: str | None) -> str | None:
+    """Find subject id by title/id/alias hint."""
+    if not hint:
+        return None
+    hint = str(hint).strip()
+    if not hint:
+        return None
+    # exact id
+    nid = normalize_id(hint)
+    if nid in state.get("subjects", {}):
+        return nid
+    resolved = resolve_subject_id(state, hint, title=hint)
+    if resolved and resolved in state.get("subjects", {}):
+        return resolved
+    matches = find_matching_subjects(state, hint)
+    if matches and matches[0][1] >= 40:
+        return matches[0][0]
+    # case-insensitive title equality
+    hlow = hint.lower()
+    for sid, sub in (state.get("subjects") or {}).items():
+        if str(sub.get("title") or "").lower() == hlow:
+            return sid
+        for al in sub.get("aliases") or []:
+            if str(al).lower() == hlow:
+                return sid
     return None
 
 

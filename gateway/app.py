@@ -739,10 +739,17 @@ class TurnResponse(BaseModel):
 
 @app.get("/api/v1/knowledge-doc")
 def knowledge_doc(request: Request, path: str = ""):
-    """Serve a file from knowledge/docs/ (authenticated). Path is relative, no .."""
+    """Serve a file from knowledge/docs/ as readable HTML (authenticated)."""
+    from fastapi.responses import HTMLResponse
+    import html as _html
+
     uid = _current_user(request)
     if not uid:
-        raise HTTPException(401, "login required")
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Login</title>"
+            "<p>Je bent niet ingelogd. Open de tutor, log in, en klik de bron opnieuw.</p>",
+            status_code=401,
+        )
     rel = (path or "").replace("\\", "/").lstrip("/")
     if not rel or ".." in rel.split("/") or rel.startswith("/"):
         raise HTTPException(400, "invalid path")
@@ -753,9 +760,28 @@ def knowledge_doc(request: Request, path: str = ""):
     except ValueError:
         raise HTTPException(400, "invalid path")
     if not target.is_file():
-        raise HTTPException(404, "not found")
-    media = "text/markdown; charset=utf-8" if target.suffix.lower() == ".md" else "text/plain; charset=utf-8"
-    return FileResponse(target, media_type=media, filename=target.name)
+        return HTMLResponse(
+            f"<!doctype html><meta charset=utf-8><title>Not found</title>"
+            f"<p>Bestand niet gevonden: {_html.escape(rel)}</p>",
+            status_code=404,
+        )
+    try:
+        body = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        raise HTTPException(500, f"read failed: {e}")
+    safe = _html.escape(body)
+    page = (
+        "<!doctype html><html><head><meta charset=utf-8>"
+        f"<meta name=viewport content=\"width=device-width, initial-scale=1\">"
+        f"<title>{_html.escape(target.name)}</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:52rem;margin:1.5rem auto;padding:0 1rem;"
+        "background:#0f1419;color:#e7ecf3;line-height:1.45}"
+        "pre{white-space:pre-wrap;word-break:break-word;font-size:0.92rem}</style></head><body>"
+        f"<p style=\"opacity:.75;font-size:.85rem\">{_html.escape(target.name)} · knowledge/docs</p>"
+        f"<pre>{safe}</pre></body></html>"
+    )
+    return HTMLResponse(page)
+
 
 
 @app.get("/api/health")
@@ -1200,6 +1226,14 @@ if WEB_DIR.is_dir():
 
     @app.get("/")
     def index():
-        return FileResponse(WEB_DIR / "index.html")
+        # Browsers (esp. desktop) aggressively cache "/"; without this, clients keep an
+        # old index.html that never renders the sources block.
+        return FileResponse(
+            WEB_DIR / "index.html",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

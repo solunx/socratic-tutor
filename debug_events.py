@@ -143,6 +143,17 @@ def log_turn(
         judge_verdict=(stats.get("judge") or {}).get("verdict") if isinstance(stats.get("judge"), dict) else None,
         judge_reason=(stats.get("judge") or {}).get("reason") if isinstance(stats.get("judge"), dict) else None,
         judge_missing=(stats.get("judge") or {}).get("missing") if isinstance(stats.get("judge"), dict) else None,
+        judge_support=_clip((stats.get("judge") or {}).get("support"), 200) if isinstance(stats.get("judge"), dict) and (stats.get("judge") or {}).get("support") else None,
+        judge_support_verified=(stats.get("judge") or {}).get("support_verified") if isinstance(stats.get("judge"), dict) else None,
+        judge_downgraded=stats.get("judge_downgraded"),
+        judge_retry=stats.get("judge_retry"),
+        judge_claim=(stats.get("judge") or {}).get("claim") if isinstance(stats.get("judge"), dict) else None,
+        judge_responsive=(stats.get("judge") or {}).get("responsive") if isinstance(stats.get("judge"), dict) else None,
+        judge_evidence=stats.get("judge_evidence"),
+        off_target_streak=stats.get("off_target_streak"),
+        concede_repair_failed=stats.get("concede_repair_failed"),
+        empty_fallback=stats.get("empty_fallback"),
+        reframe_repeat=stats.get("reframe_repeat"),
         correction_gate=stats.get("correction_gate") or assessment.get("correction_gate"),
         assessment_activity=str(assessment.get("activity") or "") or None,
         verdict=str(assessment.get("verdict") or assessment.get("last_verdict") or "") or None,
@@ -208,12 +219,16 @@ def format_events(events: list[dict], *, verbose: bool = False, switches_only: b
                 )
             gates = []
             if e.get("judge_verdict"):
-                rows.append(f"         judge: {e.get('judge_verdict')} - {str(e.get('judge_reason') or '')[:120]}"
+                rows.append(f"         judge: {e.get('judge_verdict')}"
+                            + (f" (claim={e.get('judge_claim')}, responsive={e.get('judge_responsive')})" if e.get("judge_claim") else "")
+                            + f" - {str(e.get('judge_reason') or '')[:120]}"
                             + (f"  | missing: {str(e.get('judge_missing'))[:80]}" if e.get("judge_missing") else ""))
             if e.get("judge_analysis") and verbose:
                 rows.append(f"         judge analysis: {str(e['judge_analysis'])[:240]}")
             for gk in ("gate_repair", "gate_repair_failed", "echo_flagged", "echo_repair", "echo_skipped", "gate_skipped",
-                       "reframe", "reframe_failed", "judge_failed", "judge_truncated", "correction_gate"):
+                       "reframe", "reframe_failed", "judge_failed", "judge_truncated", "correction_gate",
+                       "off_target_streak", "concede_repair_failed", "empty_fallback", "reframe_repeat",
+                       "judge_downgraded", "judge_retry"):
                 if e.get(gk) is not None:
                     gates.append(f"{gk}={e.get(gk)}")
             if gates:
