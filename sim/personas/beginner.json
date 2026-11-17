@@ -1,0 +1,10 @@
+{
+  "name": "beginner",
+  "knowledge_level": "beginner",
+  "style": "short_typo",
+  "intent_weights": {
+    "answer": 0.22, "partial": 0.28, "stuck": 0.18, "hint_request": 0.12,
+    "wrong_confident": 0.08, "reveal_request": 0.04, "challenge": 0.02,
+    "already_said": 0.04, "off_topic": 0.02
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "ems_ev_boost_under_parent",
+  "max_turns": 12,
+  "knowledge_condition": "local",
+  "setup": {
+    "ensure_subject_title": "EMS",
+    "pending_goal_text": "Ik wil EV Boost begrijpen als onderdeel van het EMS, niet als apart onderwerp."
+  },
+  "opening": "Ik wil verder over EV Boost, onder EMS. Wanneer mag de auto laden zonder zon?",
+  "force_intents": ["answer", "challenge", "partial", "answer"],
+  "truth_sheet": {
+    "topic": "EMS EV Boost",
+    "knows": [
+      "Bij EV Boost mag de auto laden zonder zon zolang de packs boven de ingestelde reserve zitten.",
+      "Bij Eco geldt een andere logica: o.a. 6A-startdrempel op zon; Boost is bewust packs naar de auto binnen de reservegrens."
+    ],
+    "half_knows": [
+      "EV Boost heeft te maken met batterijen leegtrekken naar de auto"
+    ],
+    "misconceptions": [
+      {"id": "boost_needs_sun", "statement": "EV Boost kan alleen als er zonneproductie is"}
+    ],
+    "challenge_line": "Dit is EV Boost, geen Eco: er is geen 6A-startdrempel op zon op dezelfde manier."
+  }
+}

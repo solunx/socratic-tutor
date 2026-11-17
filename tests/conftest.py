@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("METRICS_ENABLED", "0")
 os.environ.setdefault("TUTOR_EVENT_LOG", "0")
+# B1 source footer must not break contract asserts that compare response == draft
+os.environ.setdefault("TUTOR_EVIDENCE", "0")
 FIX = Path(__file__).resolve().parent / "fixtures"
 
 

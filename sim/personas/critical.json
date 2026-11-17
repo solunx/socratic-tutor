@@ -1,0 +1,10 @@
+{
+  "name": "critical",
+  "knowledge_level": "advanced",
+  "style": "plain",
+  "intent_weights": {
+    "answer": 0.3, "challenge": 0.3, "already_said": 0.15, "partial": 0.1,
+    "wrong_confident": 0.05, "stuck": 0.03, "hint_request": 0.02,
+    "reveal_request": 0.03, "off_topic": 0.02
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "confident_wrong",
+  "knowledge_level": "intermediate",
+  "style": "plain",
+  "intent_weights": {
+    "wrong_confident": 0.35, "answer": 0.15, "challenge": 0.15, "partial": 0.15,
+    "already_said": 0.08, "stuck": 0.05, "hint_request": 0.04,
+    "reveal_request": 0.02, "off_topic": 0.01
+  }
+}

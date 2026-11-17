@@ -1,0 +1,10 @@
+{
+  "name": "partial_understanding",
+  "knowledge_level": "intermediate",
+  "style": "plain",
+  "intent_weights": {
+    "answer": 0.25, "partial": 0.35, "wrong_confident": 0.1, "challenge": 0.05,
+    "stuck": 0.08, "hint_request": 0.07, "already_said": 0.05,
+    "reveal_request": 0.03, "off_topic": 0.02
+  }
+}

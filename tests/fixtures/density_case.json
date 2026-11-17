@@ -1,19 +1,42 @@
 {
- "_about": "HUMAN-CHECKED case from george's session 2026-10-20. Truth source: the owner plus the stellar-structure scaling relations eps_pp ~ rho*X^2*T^4 and eps_CNO ~ rho*X*X_CNO*T^17 (per mass); per volume both ~ rho^2, so at fixed composition and temperature the ratio does not depend on density. NOT a model-generated key.",
- "human_checked": true,
- "premises": [
-  "Twee sterren hebben dezelfde temperatuur (25 miljoen K)",
-  "Dezelfde CNO-concentratie",
-  "De ene ster heeft een hogere protonendichtheid"
- ],
- "tutor_question": "Welke keten domineert dan, en hoe beïnvloedt de protonendichtheid de relatieve snelheid van de pp-keten versus de CNO-cyclus?",
- "learner_answer": "Als er meer protonen zijn dan kunnen beide pp keten en de cno cyclus sneller gaan daar de kans op botsingen groter is. Protonendichtheid verhoogd de kans op botsingen maar niet de energie an de botsingen dus ik zou denken dat de verhouding van pp keten vs cno cyclus energieproductie gelijk blijft",
- "correct_verdict": "correct",
- "bad_tutor_reply": "Je redenering is logisch: als de dichtheid toeneemt, stijgen de reactiesnelheden van beide ketens inderdaad door meer botsingen. Maar is de verhouding tussen de snelheid van de pp-keten en de CNO-cyclus dan ook echt ongewijzigd, of is er een subtiele reden waarom de CNO-cyclus bij hoge dichtheden relatief meer wint? Denk na over de aard van de botsingen.",
- "observed_in_production": {
-  "classifier_correctness": "partial",
-  "model_verdict": "partial",
-  "policy": "missing_piece",
-  "consequence": "10 turns of pressure to find a missing piece that does not exist; a misconception 'size instead of temperature' was stored"
- }
+  "_about": "Density contrast case from george 2026-10-20. AMBIGUOUS original premise 'dezelfde CNO-concentratie'. Split into fraction vs absolute for live judge. Truth = derivation to confirm with owner.",
+  "ambiguous": true,
+  "human_checked": false,
+  "premises": [
+    "Twee sterren hebben dezelfde temperatuur (25 miljoen K)",
+    "Dezelfde CNO-concentratie",
+    "De ene ster heeft een hogere protonendichtheid"
+  ],
+  "tutor_question": "Welke keten domineert dan, en hoe beïnvloedt de protonendichtheid de relatieve snelheid van de pp-keten versus de CNO-cyclus?",
+  "learner_answer": "Als er meer protonen zijn dan kunnen beide pp keten en de cno cyclus sneller gaan daar de kans op botsingen groter is. Protonendichtheid verhoogd de kans op botsingen maar niet de energie an de botsingen dus ik zou denken dat de verhouding van pp keten vs cno cyclus energieproductie gelijk blijft",
+  "correct_verdict": "correct",
+  "bad_tutor_reply": "Je redenering is logisch: als de dichtheid toeneemt, stijgen de reactiesnelheden van beide ketens inderdaad door meer botsingen. Maar is de verhouding tussen de snelheid van de pp-keten en de CNO-cyclus dan ook echt ongewijzigd, of is er een subtiele reden waarom de CNO-cyclus bij hoge dichtheden relatief meer wint? Denk na over de aard van de botsingen.",
+  "observed_in_production": {
+    "classifier_correctness": "partial",
+    "model_verdict": "partial",
+    "policy": "missing_piece",
+    "consequence": "10 turns of pressure to find a missing piece that does not exist; a misconception was stored"
+  },
+  "variants": {
+    "fraction": {
+      "id": "density-fraction",
+      "premises": [
+        "Twee sterren hebben dezelfde temperatuur (25 miljoen K)",
+        "Dezelfde CNO-massafractie (X_CNO vast)",
+        "De ene ster heeft een hogere totale densiteit / protonendichtheid (schaling bij vaste compositie)"
+      ],
+      "expect": "correct",
+      "note": "At fixed composition both eps scale ~ rho^2; ratio independent of density"
+    },
+    "absolute": {
+      "id": "density-absolute",
+      "premises": [
+        "Twee sterren hebben dezelfde temperatuur (25 miljoen K)",
+        "Dezelfde absolute CNO-deeltjesdichtheid n_CNO (niet de massafractie)",
+        "De ene ster heeft een hogere protonendichtheid n_p"
+      ],
+      "expect": "incorrect",
+      "note": "pp ~ n_p^2, CNO ~ n_p*n_CNO; if n_CNO fixed while n_p rises, ratio CNO/pp falls — learner said ratio stays equal"
+    }
+  }
 }

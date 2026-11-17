@@ -1,0 +1,27 @@
+{
+  "id": "ems_eco_basics",
+  "max_turns": 12,
+  "knowledge_condition": "local",
+  "setup": {
+    "ensure_subject_title": "EMS",
+    "pending_goal_text": "Ik wil de eco-wet en de 6A-rem van mijn EMS begrijpen."
+  },
+  "opening": "Ik wil de eco-wet en de 6A-rem van mijn EMS snappen. Ik begin bij de 6A-rem.",
+  "truth_sheet": {
+    "topic": "EMS Eco",
+    "knows": [
+      "Een stilstaande auto start niet onder 6 A, ook als de som net boven de reserve zit.",
+      "De 6A-rem voorkomt dat de auto 's nachts de batterijen leegtrekt tot de reserve."
+    ],
+    "half_knows": [
+      "iets met 6A en zon, maar niet zeker wanneer een lopende auto stopt"
+    ],
+    "misconceptions": [
+      {
+        "id": "6a_is_battery_power",
+        "statement": "6A is extra vermogen dat de batterij bijlevert bovenop de zon"
+      }
+    ],
+    "challenge_line": "Je blijft op de 300 W / lopende-auto-vraag hangen terwijl ik over de stilstaande auto en 6A praat."
+  }
+}

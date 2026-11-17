@@ -1,0 +1,15 @@
+{
+  "name": "skeptical_expert",
+  "style": "plain",
+  "intent_weights": {
+    "answer": 0.35,
+    "partial": 0.05,
+    "wrong_confident": 0.05,
+    "challenge": 0.25,
+    "already_said": 0.15,
+    "hint_request": 0.02,
+    "stuck": 0.03,
+    "off_topic": 0.05,
+    "reveal_request": 0.05
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "struggling",
+  "knowledge_level": "beginner",
+  "style": "short_typo",
+  "intent_weights": {
+    "answer": 0.15, "partial": 0.25, "wrong_confident": 0.2, "stuck": 0.15,
+    "hint_request": 0.1, "already_said": 0.05, "challenge": 0.05,
+    "reveal_request": 0.03, "off_topic": 0.02
+  }
+}

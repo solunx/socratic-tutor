@@ -1,0 +1,13 @@
+{
+  "id": "arith_control",
+  "max_turns": 4,
+  "opening": "A is 3 meer dan B en B is 4; wat is A?",
+  "force_intents": ["answer", "wrong_confident", "challenge"],
+  "truth_sheet": {
+    "topic": "arith",
+    "knows": ["A is 7 want 4 + 3 = 7"],
+    "half_knows": ["B is 4"],
+    "misconceptions": [{"statement": "A is 12"}],
+    "challenge_line": "Nee, meer dan betekent optellen, niet vermenigvuldigen"
+  }
+}

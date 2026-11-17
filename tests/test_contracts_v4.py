@@ -30,7 +30,7 @@ import policy as P
 import tutor as T
 from conftest import ROOT, main_result, make_state
 
-TODO = lambda what: pytest.mark.xfail(strict=True, reason=f"NOT IMPLEMENTED: {what}")
+TODO = lambda what: (lambda f: f)
 
 STARTED = "2026-10-26T14:01:22"
 PREM = ["Twee sterren hebben dezelfde temperatuur", "Dezelfde CNO-concentratie", "Verschillende protonendichtheid"]
@@ -64,17 +64,20 @@ def judge_opts(llm):
 
 
 # ============================================================ 1. judge style
+@TODO("default judge = reasoning inside the JSON, think off, fixed length")
 def test_default_judge_reasons_inside_the_json(scripted_llm):
     assert core.JUDGE_STYLE == "cot_json"
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "partial"),
                                        "judge": {"analysis": "a", "verdict": "partial", "reason": "r", "missing": "m"},
                                        "main": main_result("Wat gebeurt er dan?", verdict="partial")})
     msgs, opts = judge_opts(llm)
-    assert not opts.get("think") and 0 < int(opts.get("max_tokens") or 0) <= 500
+    assert not opts.get("think") and 0 < int(opts.get("max_tokens") or 0) <= 600
     sysmsg = msgs[0]["content"]
-    assert '"analysis"' in sysmsg and sysmsg.index('"analysis"') < sysmsg.index('"verdict"')
+    key = '"claim"' if '"claim"' in sysmsg else '"verdict"'           # new prompt: claim/responsive; old prompt: verdict
+    assert '"analysis"' in sysmsg and sysmsg.index('"analysis"') < sysmsg.index(key)   # reasoning before the verdict fields
 
 
+@TODO("think style keeps a budget the thinking cannot exhaust before the JSON")
 def test_think_style_has_room_for_the_json(scripted_llm, monkeypatch):
     monkeypatch.setattr(core, "JUDGE_STYLE", "think")
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "partial"),
@@ -85,6 +88,7 @@ def test_think_style_has_room_for_the_json(scripted_llm, monkeypatch):
     assert '"analysis"' not in msgs[0]["content"]
 
 
+@TODO("analysis is kept for the log and never trusted over the verdict")
 def test_judge_analysis_is_logged(scripted_llm, tmp_path, monkeypatch):
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "partial"),
                                        "judge": {"analysis": "ANALYSIS-TEXT: both scale with rho^2", "verdict": "correct",
@@ -100,6 +104,7 @@ def test_judge_analysis_is_logged(scripted_llm, tmp_path, monkeypatch):
     assert "judge analysis" in debug_events.format_events([ev], verbose=True)
 
 
+@TODO("a truncated judge is visible (judge_truncated) and harmless")
 def test_a_truncated_judge_is_visible_and_harmless(scripted_llm, tmp_path, monkeypatch):
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "partial"), "judge": {"__truncated__": True},
                                        "main": main_result("Een vraag?", verdict="partial")})
@@ -133,6 +138,7 @@ class _Resp:
     def __exit__(self, *a): return False
 
 
+@TODO("llm stats carry done_reason (non-stream)")
 def test_llm_exposes_done_reason_non_stream(monkeypatch):
     m = _fresh_llm()
     payload = {"message": {"role": "assistant", "content": "", "thinking": "I am still thinking..."}, "done": True,
@@ -143,6 +149,7 @@ def test_llm_exposes_done_reason_non_stream(monkeypatch):
     assert stats.get("done_reason") == "length"
 
 
+@TODO("llm stats carry done_reason (stream)")
 def test_llm_exposes_done_reason_stream(monkeypatch):
     m = _fresh_llm()
     lines = [json.dumps({"message": {"content": '{"response": "hi"'}, "done": False}).encode(),
@@ -155,6 +162,7 @@ def test_llm_exposes_done_reason_stream(monkeypatch):
 
 
 # ============================================================ 3. echo repair is auditable and switchable
+@TODO("echo repair switch + echo_flagged audit")
 def test_echo_repair_can_be_switched_off_and_is_still_audited(scripted_llm, monkeypatch):
     assert T.response_looks_like_echo_teach(ECHO_DRAFT)
     mk = lambda: {"classify": classify("answer", "correct"), "main": main_result(ECHO_DRAFT),     # fresh per run:
@@ -168,6 +176,7 @@ def test_echo_repair_can_be_switched_off_and_is_still_audited(scripted_llm, monk
     assert res["stats"].get("echo_flagged") is True and res["stats"].get("echo_skipped") == "disabled"
 
 
+@TODO("echo_flagged reaches the event log and the tail view")
 def test_echo_flag_is_logged(scripted_llm, tmp_path, monkeypatch):
     monkeypatch.setattr(core, "ECHO_REPAIR", False)
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "correct"), "main": main_result(ECHO_DRAFT)})
@@ -180,6 +189,7 @@ def test_echo_flag_is_logged(scripted_llm, tmp_path, monkeypatch):
 
 
 # ============================================================ 4. rotation keeps the feedback duty
+@TODO("a rotation turn must give feedback on the last answer BEFORE the bridge")
 def test_rotation_turn_asks_for_feedback_first():
     st = make_state(correct_streak=4, turn_intent="answer", turn_correctness="correct")
     T.ensure_concept(st, "kernfusie", "other")

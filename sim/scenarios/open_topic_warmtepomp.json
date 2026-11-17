@@ -1,0 +1,14 @@
+{
+  "id": "open_topic_warmtepomp",
+  "max_turns": 10,
+  "knowledge_condition": "model_only",
+  "score_mode": "behavior_only",
+  "opening": "Ik wil iets leren over warmtepompen maar weet niet waar ik moet beginnen.",
+  "truth_sheet": {
+    "topic": "warmtepomp",
+    "knows": [],
+    "half_knows": ["het heeft met verwarmen te maken"],
+    "misconceptions": [],
+    "challenge_line": "Je legt iets uit dat ik niet gevraagd heb."
+  }
+}

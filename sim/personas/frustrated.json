@@ -1,0 +1,10 @@
+{
+  "name": "frustrated",
+  "knowledge_level": "beginner",
+  "style": "short_typo",
+  "intent_weights": {
+    "stuck": 0.22, "already_said": 0.22, "reveal_request": 0.12, "challenge": 0.12,
+    "partial": 0.12, "answer": 0.1, "hint_request": 0.05,
+    "wrong_confident": 0.03, "off_topic": 0.02
+  }
+}

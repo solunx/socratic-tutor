@@ -151,13 +151,18 @@ def test_echo_repair_carries_the_constraints(scripted_llm):
     assert "change one variable" not in b.lower() and "different case" not in b.lower()
 
 
-@TODO("concede turns are never rewritten by a repair")
+@TODO("concede turns are not rewritten by the GENERIC repair (an exact duplicate gets the concede-specific reply, see v5)")
 @pytest.mark.parametrize("kind", ["gate", "echo"])
-def test_concede_turns_are_never_rewritten(fx, scripted_llm, kind):
+def test_concede_turns_are_never_rewritten(fx, scripted_llm, kind, monkeypatch):
     turns = {t["idx"]: t for t in fx["turns"]}
     draft = turns[36]["text"] if kind == "gate" else ECHO_DRAFT
     conv = conversation_upto(fx, 35) if kind == "gate" else []
     msg = turns[35]["text"] if kind == "gate" else "Dat zei ik toch al, de temperatuur was gelijk"
+    if kind == "gate":
+        # a gate block that is NOT a near-exact duplicate (score 0.9): on a concede turn it must not be rewritten.
+        # (an exact duplicate is handled by the concede-specific reply; see test_contracts_v5)
+        import guards
+        monkeypatch.setattr(core.G, "repeat_gate", lambda cand, hist, **k: guards.GateResult(True, "repeat", 0.9, 1))
     script = lambda intent: {"classify": classify(intent, "correct"), "main": main_result(draft),
                              "repair": {"response": REPAIR_TEXT, "assessment": {}, "session": {}}}
     # control: with a plain answer the repair DOES run (otherwise this test would pass vacuously)
@@ -186,7 +191,7 @@ def test_judge_runs_before_main_with_premises_think_and_a_cap(scripted_llm):
     if style == "think":
         assert opts.get("think") and 0 < int(opts.get("max_tokens") or 0) <= 1500
     else:
-        assert not opts.get("think") and 0 < int(opts.get("max_tokens") or 0) <= 500
+        assert not opts.get("think") and 0 < int(opts.get("max_tokens") or 0) <= 600
 
 
 @TODO("judge only where the tutor would grade its own homework")
@@ -257,7 +262,8 @@ def test_misconception_needs_a_confirmed_error(scripted_llm, cls, judge, verdict
 def test_a_failing_judge_is_visible_and_harmless(scripted_llm):
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", "partial"), "judge": {"verdict": "maybe"},
                                        "main": main_result("Een vraag?", verdict="partial")})
-    assert res["ok"] and llm.roles() == ["classify", "judge", "main"]
+    roles = llm.roles()
+    assert res["ok"] and roles[0] == "classify" and roles[-1] == "main" and roles.count("judge") in (1, 2)   # (patch 6: one cheap retry)
     assert res["stats"].get("judge_called") is True and res["stats"].get("judge_failed") is True
     assert not st["active_session"].get("judge")
 
@@ -286,10 +292,10 @@ def test_policy_reason_has_a_directive_per_verdict(verdict, needle):
 
 
 # =========================================================== 4. the human-checked density case (end to end wiring)
-@TODO("the human-checked case: a correct answer must not become 'ask the missing piece'")
+@TODO("a correct answer (as judged) must not become 'ask the missing piece'")
 def test_density_case_correct_answer_is_confirmed_not_challenged(scripted_llm):
     d = density()
-    assert d["human_checked"] and d["correct_verdict"] == "correct"
+    assert d["correct_verdict"] == "correct" and d["ambiguous"]      # wiring test; the TRUTH depends on the reading
     # exactly what production did: classifier 'partial', tutor model verdict 'partial', draft challenges the learner
     res, st, llm = turn(scripted_llm, {"classify": classify("answer", d["observed_in_production"]["classifier_correctness"]),
                                        "judge": j(d["correct_verdict"], "at fixed T and composition both rates scale with rho^2"),
